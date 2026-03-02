@@ -6,20 +6,17 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
         args: [--allow-multiple-documents]
+        exclude: ^charts/.*/templates/
       - id: check-merge-conflict
       - id: check-added-large-files
 
-  - repo: https://github.com/golangci/golangci-lint
-    rev: v2.8.0
-    hooks:
-      - id: golangci-lint
-        args: [--timeout=5m]
-
+  # Use local make lint instead of the upstream golangci-lint hook,
+  # because the project uses a custom plugin build (.custom-gcl.yml).
   - repo: local
     hooks:
-      - id: go-vet
-        name: go vet
-        entry: go vet ./...
+      - id: golangci-lint
+        name: golangci-lint
+        entry: make lint
         language: system
         types: [go]
         pass_filenames: false

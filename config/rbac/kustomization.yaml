@@ -28,4 +28,3 @@ resources:
 - backupstore_admin_role.yaml
 - backupstore_editor_role.yaml
 - backupstore_viewer_role.yaml
-
