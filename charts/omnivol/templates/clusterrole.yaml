@@ -1,0 +1,68 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "omnivol.fullname" . }}-manager
+  labels:
+    {{- include "omnivol.labels" . | nindent 4 }}
+rules:
+  # PersistentVolumes — provisioner creates and deletes PVs
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # PersistentVolumeClaims — provisioner creates/deletes underlying PVCs
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["get", "update", "patch"]
+
+  # StorageClasses — provisioner reads StorageClass parameters
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # Secrets — provisioner creates restic credential secrets;
+  # BackupStore controller reads credential secrets;
+  # Orphan controller deletes orphaned restic secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Events — external-provisioner and drain watcher emit events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+
+  # Nodes — drain watcher
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # omnivol CRDs
+  - apiGroups: ["omnivol.smoothify.com"]
+    resources: ["backuppolicies", "backupstores"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["omnivol.smoothify.com"]
+    resources: ["backuppolicies/status", "backupstores/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["omnivol.smoothify.com"]
+    resources: ["backuppolicies/finalizers", "backupstores/finalizers"]
+    verbs: ["update"]
+
+  # VolSync ReplicationSource
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationsources"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationsources/status"]
+    verbs: ["get", "watch"]
+
+  # VolSync ReplicationDestination
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationdestinations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationdestinations/status"]
+    verbs: ["get", "watch"]

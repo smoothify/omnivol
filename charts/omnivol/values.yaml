@@ -1,0 +1,74 @@
+# Default values for omnivol.
+
+# -- Number of controller replicas. Only 1 is recommended (leader election handles HA).
+replicaCount: 1
+
+image:
+  # -- Container image repository.
+  repository: ghcr.io/smoothify/omnivol
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+
+# -- Override the release name.
+nameOverride: ""
+# -- Override the full release name.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Whether to create a ServiceAccount.
+  create: true
+  # -- Annotations to add to the ServiceAccount.
+  annotations: {}
+  # -- The name of the ServiceAccount. If not set, a name is generated.
+  name: ""
+
+# -- Pod-level security context.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context.
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resource requests and limits.
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Node selector for the controller pod.
+nodeSelector: {}
+
+# -- Tolerations for the controller pod.
+tolerations: []
+
+# -- Affinity rules for the controller pod.
+affinity: {}
+
+# -- Additional pod annotations.
+podAnnotations: {}
+
+# -- Additional pod labels.
+podLabels: {}
+
+leaderElection:
+  # -- Enable leader election for controller manager.
+  enabled: true
+
+healthProbes:
+  # -- Port for health probes (/healthz and /readyz).
+  port: 8081

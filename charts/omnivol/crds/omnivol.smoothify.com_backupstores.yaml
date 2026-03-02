@@ -1,0 +1,184 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: backupstores.omnivol.smoothify.com
+spec:
+  group: omnivol.smoothify.com
+  names:
+    kind: BackupStore
+    listKind: BackupStoreList
+    plural: backupstores
+    shortNames:
+    - bs
+    singular: backupstore
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.s3.endpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .spec.s3.bucket
+      name: Bucket
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          BackupStore is the Schema for the backupstores API.
+          A BackupStore describes WHERE backups are stored (S3 endpoint + credentials).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of BackupStore.
+            properties:
+              s3:
+                description: s3 contains the S3-compatible storage configuration.
+                properties:
+                  bucket:
+                    description: bucket is the name of the S3 bucket where backups
+                      are stored.
+                    minLength: 1
+                    type: string
+                  credentialsSecret:
+                    description: |-
+                      credentialsSecret is the name of a Secret (in the controller namespace) containing
+                      the keys "access-key-id" and "secret-access-key" for the S3 bucket.
+                      Optionally include a "restic-password" key as the fallback restic encryption password.
+                    minLength: 1
+                    type: string
+                  endpoint:
+                    description: |-
+                      endpoint is the S3-compatible endpoint URL (e.g. "s3.us-east-1.amazonaws.com" or a MinIO address).
+                      Do not include a scheme — TLS is controlled by the tls field.
+                    minLength: 1
+                    type: string
+                  region:
+                    description: region is the AWS region (or equivalent) for the
+                      bucket.
+                    type: string
+                  resticPasswordSecretRef:
+                    description: |-
+                      resticPasswordSecretRef references a specific Secret and key that holds the restic
+                      repository encryption password.  The Secret is resolved in the controller namespace.
+                      If omitted the controller reads key "restic-password" from credentialsSecret.
+                    properties:
+                      key:
+                        description: key is the key within the Secret.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: name is the name of the Secret.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  tls:
+                    default: true
+                    description: |-
+                      tls controls whether TLS is used when connecting to the endpoint.
+                      Defaults to true.
+                    type: boolean
+                required:
+                - bucket
+                - credentialsSecret
+                - endpoint
+                type: object
+            required:
+            - s3
+            type: object
+          status:
+            description: status defines the observed state of BackupStore.
+            properties:
+              conditions:
+                description: conditions represent the current state of the BackupStore
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
