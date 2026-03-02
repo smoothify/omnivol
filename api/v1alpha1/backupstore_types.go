@@ -58,6 +58,12 @@ type S3Config struct {
 	// "access-key-id" and "secret-access-key".
 	// +required
 	CredentialsSecret corev1.SecretReference `json:"credentialsSecret"`
+
+	// resticPasswordSecretRef references the secret key that holds the restic
+	// repository encryption password.  If omitted the controller will look for
+	// a key named "restic-password" inside credentialsSecret.
+	// +optional
+	ResticPasswordSecretRef *corev1.SecretKeySelector `json:"resticPasswordSecretRef,omitempty"`
 }
 
 // BackupStoreStatus defines the observed state of BackupStore.

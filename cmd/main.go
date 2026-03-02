@@ -40,6 +40,8 @@ import (
 	sigprovisioner "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
 	omnivolv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
+	"github.com/smoothify/omnivol/internal/controller"
+	"github.com/smoothify/omnivol/internal/drain"
 	"github.com/smoothify/omnivol/internal/provisioner"
 	// +kubebuilder:scaffold:imports
 )
@@ -180,6 +182,34 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
+		os.Exit(1)
+	}
+
+	if err := (&controller.BackupStoreReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up BackupStore controller")
+		os.Exit(1)
+	}
+
+	if err := (&controller.BackupPolicyReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up BackupPolicy controller")
+		os.Exit(1)
+	}
+
+	if err := (&controller.OrphanReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up Orphan controller")
+		os.Exit(1)
+	}
+
+	if err := (&drain.Watcher{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up drain Watcher")
 		os.Exit(1)
 	}
 

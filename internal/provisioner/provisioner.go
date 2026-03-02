@@ -136,6 +136,8 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 		RepoPath:         repoPath,
 		Schedule:         schedule,
 		ResticSecretName: resticSecretName,
+		UserPVCName:      pvc.Name,
+		UserPVCNamespace: pvc.Namespace,
 	}
 
 	// 7. Check S3 for existing backup.

@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.copyMethod
       name: CopyMethod
       type: string
+    - jsonPath: .status.managedPVCCount
+      name: PVCs
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -204,6 +207,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              managedPVCCount:
+                description: managedPVCCount is the number of user PVCs currently
+                  provisioned by this policy.
+                format: int32
+                type: integer
             type: object
         required:
         - spec

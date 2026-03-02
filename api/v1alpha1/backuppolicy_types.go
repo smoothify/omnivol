@@ -105,6 +105,10 @@ type BackupPolicyStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// managedPVCCount is the number of user PVCs currently provisioned by this policy.
+	// +optional
+	ManagedPVCCount int32 `json:"managedPVCCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -113,6 +117,7 @@ type BackupPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Store",type=string,JSONPath=`.spec.backupStore`
 // +kubebuilder:printcolumn:name="Schedule",type=string,JSONPath=`.spec.schedule`
 // +kubebuilder:printcolumn:name="CopyMethod",type=string,JSONPath=`.spec.copyMethod`
+// +kubebuilder:printcolumn:name="PVCs",type=integer,JSONPath=`.status.managedPVCCount`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // BackupPolicy is the Schema for the backuppolicies API.

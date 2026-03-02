@@ -84,4 +84,11 @@ type EnsureParams struct {
 
 	// ResticSecretName is the name of the restic credentials Secret to create/use.
 	ResticSecretName string
+
+	// UserPVCName is the name of the user-facing PVC (the virtual PVC backed by
+	// this provisioner).  Used to set orphan-tracking annotations on managed resources.
+	UserPVCName string
+
+	// UserPVCNamespace is the namespace of the user-facing PVC.
+	UserPVCNamespace string
 }
