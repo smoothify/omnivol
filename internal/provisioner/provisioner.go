@@ -175,10 +175,7 @@ func (p *OmnivolProvisioner) Delete(ctx context.Context, pv *corev1.PersistentVo
 	}
 
 	// 1. Trigger a final pre-delete backup and wait.
-	deleteTimeout := 5 * time.Minute
-	if pv.Labels != nil {
-		// Timeout is not stored on the PV; we use the default.
-	}
+	deleteTimeout := p.resolveDeleteTimeout(ctx, pv)
 	timeoutCtx, cancel := context.WithTimeout(ctx, deleteTimeout)
 	defer cancel()
 
@@ -298,7 +295,7 @@ func (p *OmnivolProvisioner) buildPV(
 			Capacity: corev1.ResourceList{
 				corev1.ResourceStorage: capacity,
 			},
-			PersistentVolumeReclaimPolicy: *options.StorageClass.ReclaimPolicy,
+			PersistentVolumeReclaimPolicy: reclaimPolicyOrDefault(options.StorageClass.ReclaimPolicy),
 			StorageClassName:              options.StorageClass.Name,
 			MountOptions:                  options.StorageClass.MountOptions,
 		},
@@ -371,4 +368,52 @@ func waitForBound(ctx context.Context, c client.Client, name, namespace string) 
 // resourceFromStr is a small helper for tests.
 func resourceFromStr(s string) resource.Quantity {
 	return resource.MustParse(s)
+}
+
+// defaultDeleteTimeout is used when the BackupPolicy cannot be resolved or its
+// deleteTimeout cannot be parsed.
+const defaultDeleteTimeout = 5 * time.Minute
+
+// resolveDeleteTimeout looks up the BackupPolicy via the PV's StorageClass to
+// read the configured deleteTimeout.  Falls back to defaultDeleteTimeout on any
+// error or when the PV/StorageClass/policy chain is broken.
+func (p *OmnivolProvisioner) resolveDeleteTimeout(ctx context.Context, pv *corev1.PersistentVolume) time.Duration {
+	scName := pv.Spec.StorageClassName
+	if scName == "" {
+		return defaultDeleteTimeout
+	}
+
+	sc := &storagev1.StorageClass{}
+	if err := p.client.Get(ctx, types.NamespacedName{Name: scName}, sc); err != nil {
+		return defaultDeleteTimeout
+	}
+
+	policyName, ok := sc.Parameters[paramBackupPolicy]
+	if !ok || policyName == "" {
+		return defaultDeleteTimeout
+	}
+
+	policy := &omniv1alpha1.BackupPolicy{}
+	if err := p.client.Get(ctx, types.NamespacedName{Name: policyName}, policy); err != nil {
+		return defaultDeleteTimeout
+	}
+
+	if policy.Spec.DeleteTimeout == "" {
+		return defaultDeleteTimeout
+	}
+
+	d, err := time.ParseDuration(policy.Spec.DeleteTimeout)
+	if err != nil {
+		return defaultDeleteTimeout
+	}
+	return d
+}
+
+// reclaimPolicyOrDefault safely dereferences a *PersistentVolumeReclaimPolicy,
+// defaulting to Delete if nil.
+func reclaimPolicyOrDefault(p *corev1.PersistentVolumeReclaimPolicy) corev1.PersistentVolumeReclaimPolicy {
+	if p == nil {
+		return corev1.PersistentVolumeReclaimDelete
+	}
+	return *p
 }
