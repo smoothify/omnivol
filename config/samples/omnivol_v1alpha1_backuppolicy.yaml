@@ -1,9 +1,30 @@
 apiVersion: omnivol.smoothify.com/v1alpha1
 kind: BackupPolicy
 metadata:
-  labels:
-    app.kubernetes.io/name: omnivol
-    app.kubernetes.io/managed-by: kustomize
-  name: backuppolicy-sample
+  name: hourly
 spec:
-  # TODO(user): Add fields here
+  # Name of the BackupStore that provides the S3 endpoint and credentials.
+  backupStore: default-store
+
+  # The underlying StorageClass used to provision the real PVC (e.g. openebs-lvm).
+  storageClassName: openebs-lvm
+
+  # Default backup schedule (cron). The minute field is replaced at provision time
+  # with a deterministic per-PVC offset to spread load across the hour.
+  schedule: "0 * * * *"
+
+  # REQUIRED — no default. One of: None, Clone, Snapshot, Direct.
+  copyMethod: Snapshot
+
+  retain:
+    hourly: 24
+    daily: 7
+    weekly: 4
+    monthly: 2
+
+  # Block PV binding until a restore from S3 completes (when a prior backup exists).
+  # Set to false to skip automatic restore on new PVC creation.
+  restoreOnCreate: true
+
+  # Maximum time to wait for a final pre-delete backup before forcibly removing the PVC.
+  deleteTimeout: 5m
