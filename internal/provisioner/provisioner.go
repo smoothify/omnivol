@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	provisioner "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
@@ -59,9 +58,6 @@ const (
 
 	// Suffix appended to the underlying PVC name.
 	underlyingSuffix = "-omnivol"
-
-	pollInterval = 5 * time.Second
-	pollTimeout  = 10 * time.Minute
 )
 
 // OmnivolProvisioner implements the external provisioner interface.
@@ -272,7 +268,7 @@ func (p *OmnivolProvisioner) createUnderlyingPVC(
 // so that the pod can mount the volume directly (no extra indirection).
 func (p *OmnivolProvisioner) buildPV(
 	options provisioner.ProvisionOptions,
-	underlyingPVC *corev1.PersistentVolumeClaim,
+	_ *corev1.PersistentVolumeClaim,
 	underlyingPV *corev1.PersistentVolume,
 	underlyingName, underlyingNS string,
 ) *corev1.PersistentVolume {
@@ -349,23 +345,6 @@ func effectiveSchedule(pvc *corev1.PersistentVolumeClaim, policy *omniv1alpha1.B
 		return v
 	}
 	return policy.Spec.Schedule
-}
-
-// waitForBound polls until the PVC is bound.  Used in tests.
-func waitForBound(ctx context.Context, c client.Client, name, namespace string) (*corev1.PersistentVolumeClaim, error) {
-	var result *corev1.PersistentVolumeClaim
-	err := wait.PollUntilContextTimeout(ctx, pollInterval, pollTimeout, true, func(ctx context.Context) (bool, error) {
-		pvc := &corev1.PersistentVolumeClaim{}
-		if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, pvc); err != nil {
-			return false, client.IgnoreNotFound(err)
-		}
-		if pvc.Status.Phase == corev1.ClaimBound {
-			result = pvc
-			return true, nil
-		}
-		return false, nil
-	})
-	return result, err
 }
 
 // resourceFromStr is a small helper for tests.

@@ -20,7 +20,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run linters
-        run: make vet
+        run: make lint
 
       - name: Run tests
         run: make test

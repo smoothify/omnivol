@@ -123,7 +123,7 @@ func TestApplyStagger(t *testing.T) {
 func TestMinuteOffsetDeterminism(t *testing.T) {
 	uid := types.UID("550e8400-e29b-41d4-a716-446655440000")
 	first := stagger.MinuteOffset(uid)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if got := stagger.MinuteOffset(uid); got != first {
 			t.Fatalf("non-deterministic: iteration %d got %d, want %d", i, got, first)
 		}

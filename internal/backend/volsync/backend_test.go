@@ -39,6 +39,8 @@ func newScheme() *runtime.Scheme {
 	return s
 }
 
+const testControllerNS = "omnivol-system"
+
 func newTestParams(controllerNS string) backend.EnsureParams {
 	return backend.EnsureParams{
 		Policy: &omniv1alpha1.BackupPolicy{
@@ -84,7 +86,7 @@ func newTestParams(controllerNS string) backend.EnsureParams {
 
 func TestEnsureResticSecret_CreatesSecret(t *testing.T) {
 	ctx := context.Background()
-	controllerNS := "omnivol-system"
+	controllerNS := testControllerNS
 
 	credSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "s3-creds", Namespace: controllerNS},
@@ -124,7 +126,7 @@ func TestEnsureResticSecret_CreatesSecret(t *testing.T) {
 
 func TestEnsureResticSecret_MissingCredentials(t *testing.T) {
 	ctx := context.Background()
-	controllerNS := "omnivol-system"
+	controllerNS := testControllerNS
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	b := New(c)
@@ -165,7 +167,7 @@ func TestResolveResticPassword_FallbackKey(t *testing.T) {
 
 func TestResolveResticPassword_ExplicitRef(t *testing.T) {
 	ctx := context.Background()
-	controllerNS := "omnivol-system"
+	controllerNS := testControllerNS
 
 	resticSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "custom-restic", Namespace: controllerNS},

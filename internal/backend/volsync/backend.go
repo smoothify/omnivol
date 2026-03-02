@@ -38,10 +38,6 @@ import (
 )
 
 const (
-	// resticPrefix is prepended to restic repository paths to form the full
-	// repository URL passed to VolSync: "s3:<endpoint>/<bucket>/<path>".
-	resticPrefix = "s3"
-
 	// underlyingSuffix is appended to the user PVC name to form the underlying PVC name.
 	underlyingSuffix = "-omnivol"
 

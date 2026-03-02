@@ -21,6 +21,7 @@ package drain
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
@@ -132,21 +133,13 @@ func pvPinnedToNode(pv *corev1.PersistentVolume, nodeName string) bool {
 	}
 	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
 		for _, expr := range term.MatchExpressions {
-			if expr.Key == "kubernetes.io/hostname" {
-				for _, v := range expr.Values {
-					if v == nodeName {
-						return true
-					}
-				}
+			if expr.Key == "kubernetes.io/hostname" && slices.Contains(expr.Values, nodeName) {
+				return true
 			}
 		}
 		for _, field := range term.MatchFields {
-			if field.Key == "metadata.name" {
-				for _, v := range field.Values {
-					if v == nodeName {
-						return true
-					}
-				}
+			if field.Key == "metadata.name" && slices.Contains(field.Values, nodeName) {
+				return true
 			}
 		}
 	}
