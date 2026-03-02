@@ -136,7 +136,7 @@ status:
   conditions: []
 ```
 
-### `StorageClass` (user-created in flux-bootstrap)
+### `StorageClass`
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -411,8 +411,6 @@ omnivol/
 - [ ] `hack/setup-kind-cluster.sh`
 - [ ] End-to-end smoke tests
 
-### Phase 4 — flux-bootstrap cutover
-- [ ] Add `kluctl/deployment/omnivol/`
-- [ ] Remove pvc-plumber + Kyverno volsync policies
-- [ ] Migrate 4 PVC files to new StorageClass
-- [ ] Deploy to oke-ldn-2 test namespace → flip real workloads
+### Phase 4 — Integration testing
+- [ ] End-to-end smoke tests against kind cluster
+- [ ] Deploy to test namespace and validate full lifecycle
