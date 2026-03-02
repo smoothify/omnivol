@@ -21,6 +21,7 @@ package volsync
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
@@ -40,6 +41,9 @@ const (
 	// resticPrefix is prepended to restic repository paths to form the full
 	// repository URL passed to VolSync: "s3:<endpoint>/<bucket>/<path>".
 	resticPrefix = "s3"
+
+	// underlyingSuffix is appended to the user PVC name to form the underlying PVC name.
+	underlyingSuffix = "-omnivol"
 
 	pollInterval = 5 * time.Second
 	pollTimeout  = 10 * time.Minute
@@ -248,8 +252,12 @@ func (b *Backend) Cleanup(ctx context.Context, pvcName, namespace string) error 
 		}
 	}
 
+	// The secret is named "omnivol-<userPVCName>", but pvcName here is the
+	// underlying PVC name (<userPVCName>-omnivol).  Strip the suffix to recover
+	// the user PVC name.
+	userPVCName := strings.TrimSuffix(pvcName, underlyingSuffix)
 	secret := &corev1.Secret{}
-	secretNN := types.NamespacedName{Name: "omnivol-" + pvcName, Namespace: namespace}
+	secretNN := types.NamespacedName{Name: "omnivol-" + userPVCName, Namespace: namespace}
 	if err := b.client.Get(ctx, secretNN, secret); err == nil {
 		if err := b.client.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete restic secret: %w", err)
