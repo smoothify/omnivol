@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,35 @@ func (r *BackupPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	logger.Info("Reconciling BackupPolicy", "name", policy.Name)
 
+	// Validate the referenced BackupStore exists and is Ready.
+	store := &omniv1alpha1.BackupStore{}
+	if err := r.Get(ctx, client.ObjectKey{Name: policy.Spec.BackupStore}, store); err != nil {
+		current := &omniv1alpha1.BackupPolicy{}
+		if getErr := r.Get(ctx, req.NamespacedName, current); getErr != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(getErr)
+		}
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: current.Generation,
+			Reason:             "BackupStoreNotFound",
+			Message:            fmt.Sprintf("Referenced BackupStore %q not found", policy.Spec.BackupStore),
+		})
+		if updateErr := r.Status().Update(ctx, current); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{RequeueAfter: policyResyncPeriod}, nil
+	}
+
+	// Check if the BackupStore is Ready.
+	storeReady := false
+	for _, c := range store.Status.Conditions {
+		if c.Type == conditionReady && c.Status == metav1.ConditionTrue {
+			storeReady = true
+			break
+		}
+	}
+
 	count, err := r.countManagedPVCs(ctx, policy.Name)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -78,20 +108,30 @@ func (r *BackupPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               conditionReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: current.Generation,
-		Reason:             "Reconciled",
-		Message:            "BackupPolicy is active",
-	})
+	if storeReady {
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: current.Generation,
+			Reason:             "Reconciled",
+			Message:            "BackupPolicy is active",
+		})
+	} else {
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: current.Generation,
+			Reason:             "BackupStoreNotReady",
+			Message:            fmt.Sprintf("Referenced BackupStore %q is not Ready", policy.Spec.BackupStore),
+		})
+	}
 	current.Status.ManagedPVCCount = int32(count)
 
 	if err := r.Status().Update(ctx, current); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("BackupPolicy reconciled", "name", policy.Name, "managedPVCCount", count)
+	logger.Info("BackupPolicy reconciled", "name", policy.Name, "managedPVCCount", count, "storeReady", storeReady)
 
 	// Resync periodically to keep the count up to date even without events.
 	return ctrl.Result{RequeueAfter: policyResyncPeriod}, nil
