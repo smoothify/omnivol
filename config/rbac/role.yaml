@@ -1,0 +1,65 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: omnivol
+    app.kubernetes.io/managed-by: kustomize
+  name: manager-role
+rules:
+  # PersistentVolumes — provisioner creates and deletes PVs
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # PersistentVolumeClaims — provisioner creates/deletes underlying PVCs and
+  # watches user PVCs for binding status
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["get", "update", "patch"]
+
+  # StorageClasses — provisioner reads StorageClass parameters
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # Secrets — provisioner creates and deletes restic credential secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Events — external-provisioner library emits events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+
+  # Nodes — needed for node affinity resolution
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # omnivol CRDs — provisioner reads BackupPolicy and BackupStore
+  - apiGroups: ["omnivol.smoothify.com"]
+    resources: ["backuppolicies", "backupstores"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["omnivol.smoothify.com"]
+    resources: ["backuppolicies/status", "backupstores/status"]
+    verbs: ["get"]
+
+  # VolSync ReplicationSource — provisioner creates, updates, deletes
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationsources"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationsources/status"]
+    verbs: ["get", "watch"]
+
+  # VolSync ReplicationDestination — provisioner creates and deletes for restore
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationdestinations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationdestinations/status"]
+    verbs: ["get", "watch"]

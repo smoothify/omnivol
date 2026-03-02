@@ -1,0 +1,9 @@
+apiVersion: omnivol.smoothify.com/v1alpha1
+kind: BackupStore
+metadata:
+  labels:
+    app.kubernetes.io/name: omnivol
+    app.kubernetes.io/managed-by: kustomize
+  name: backupstore-sample
+spec:
+  # TODO(user): Add fields here
