@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,7 @@ func newScheme() *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	_ = storagev1.AddToScheme(s)
 	_ = omniv1alpha1.AddToScheme(s)
+	_ = volsyncv1alpha1.AddToScheme(s)
 	return s
 }
 
@@ -266,5 +268,119 @@ func TestBackupPolicyReconciler_ReadyWithPVCCount(t *testing.T) {
 	}
 	if updated.Status.ManagedPVCCount != 2 {
 		t.Errorf("managedPVCCount = %d, want 2", updated.Status.ManagedPVCCount)
+	}
+}
+
+// --- Orphan controller ---
+
+func TestOrphanReconciler_RS_DeletedWhenPVCMissing(t *testing.T) {
+	ctx := context.Background()
+
+	rs := &volsyncv1alpha1.ReplicationSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data-omnivol",
+			Namespace: "prod",
+			Labels:    map[string]string{labelManagedBy: labelManagedByValue},
+			Annotations: map[string]string{
+				annOwnerPVCName:      "data",
+				annOwnerPVCNamespace: "prod",
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(rs).Build()
+
+	r := &OrphanReconciler{Client: c}
+	_, err := r.reconcileReplicationSource(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "data-omnivol", Namespace: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileReplicationSource() error = %v", err)
+	}
+
+	// RS should be deleted.
+	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err == nil {
+		t.Error("expected RS to be deleted")
+	}
+}
+
+func TestOrphanReconciler_RS_KeptWhenPVCExists(t *testing.T) {
+	ctx := context.Background()
+
+	rs := &volsyncv1alpha1.ReplicationSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data-omnivol",
+			Namespace: "prod",
+			Labels:    map[string]string{labelManagedBy: labelManagedByValue},
+			Annotations: map[string]string{
+				annOwnerPVCName:      "data",
+				annOwnerPVCNamespace: "prod",
+			},
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(rs, pvc).Build()
+
+	r := &OrphanReconciler{Client: c}
+	_, err := r.reconcileReplicationSource(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "data-omnivol", Namespace: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileReplicationSource() error = %v", err)
+	}
+
+	// RS should still exist.
+	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err != nil {
+		t.Errorf("expected RS to still exist, got err: %v", err)
+	}
+}
+
+func TestOrphanReconciler_Secret_DeletedWhenOrphaned(t *testing.T) {
+	ctx := context.Background()
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "omnivol-data",
+			Namespace: "prod",
+			Labels:    map[string]string{labelManagedBy: labelManagedByValue},
+			Annotations: map[string]string{
+				annOwnerPVCName:      "data",
+				annOwnerPVCNamespace: "prod",
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(secret).Build()
+
+	r := &OrphanReconciler{Client: c}
+	_, err := r.reconcileSecret(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "omnivol-data", Namespace: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileSecret() error = %v", err)
+	}
+
+	// Secret should be deleted.
+	if err := c.Get(ctx, types.NamespacedName{Name: "omnivol-data", Namespace: "prod"}, &corev1.Secret{}); err == nil {
+		t.Error("expected Secret to be deleted")
+	}
+}
+
+func TestOrphanReconciler_NotFoundHandledGracefully(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+
+	r := &OrphanReconciler{Client: c}
+	_, err := r.reconcileReplicationSource(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "gone", Namespace: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("expected no error for not-found, got: %v", err)
 	}
 }
