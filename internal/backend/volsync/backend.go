@@ -87,10 +87,21 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 			Labels: map[string]string{
 				"omnivol.smoothify.com/managed-by": "omnivol",
 			},
+			Annotations: map[string]string{
+				"omnivol.smoothify.com/owner-pvc":           params.UserPVCName,
+				"omnivol.smoothify.com/owner-pvc-namespace": params.UserPVCNamespace,
+			},
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, b.client, rs, func() error {
+		// Preserve annotations set at creation — CreateOrUpdate may clear them on
+		// update unless we re-apply them in the mutate func.
+		if rs.Annotations == nil {
+			rs.Annotations = map[string]string{}
+		}
+		rs.Annotations["omnivol.smoothify.com/owner-pvc"] = params.UserPVCName
+		rs.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = params.UserPVCNamespace
 		rs.Spec = volsyncv1alpha1.ReplicationSourceSpec{
 			SourcePVC: pvcName,
 			Trigger: &volsyncv1alpha1.ReplicationSourceTriggerSpec{
@@ -132,10 +143,19 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 			Labels: map[string]string{
 				"omnivol.smoothify.com/managed-by": "omnivol",
 			},
+			Annotations: map[string]string{
+				"omnivol.smoothify.com/owner-pvc":           params.UserPVCName,
+				"omnivol.smoothify.com/owner-pvc-namespace": params.UserPVCNamespace,
+			},
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, b.client, rd, func() error {
+		if rd.Annotations == nil {
+			rd.Annotations = map[string]string{}
+		}
+		rd.Annotations["omnivol.smoothify.com/owner-pvc"] = params.UserPVCName
+		rd.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = params.UserPVCNamespace
 		rd.Spec = volsyncv1alpha1.ReplicationDestinationSpec{
 			Trigger: &volsyncv1alpha1.ReplicationDestinationTriggerSpec{
 				Manual: "restore-once",
@@ -258,6 +278,12 @@ func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureP
 		return fmt.Errorf("get BackupStore credentials secret: %w", err)
 	}
 
+	// Resolve the restic password.
+	resticPassword, err := b.resolveResticPassword(ctx, params, credSecret)
+	if err != nil {
+		return fmt.Errorf("resolve restic password: %w", err)
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      params.ResticSecretName,
@@ -265,19 +291,60 @@ func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureP
 			Labels: map[string]string{
 				"omnivol.smoothify.com/managed-by": "omnivol",
 			},
+			Annotations: map[string]string{
+				"omnivol.smoothify.com/owner-pvc":           params.UserPVCName,
+				"omnivol.smoothify.com/owner-pvc-namespace": params.UserPVCNamespace,
+			},
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, b.client, secret, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, b.client, secret, func() error {
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		secret.Annotations["omnivol.smoothify.com/owner-pvc"] = params.UserPVCName
+		secret.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = params.UserPVCNamespace
 		secret.StringData = map[string]string{
 			"RESTIC_REPOSITORY":     repoURL,
-			"RESTIC_PASSWORD":       "omnivol", // placeholder; real clusters use ExternalSecret
+			"RESTIC_PASSWORD":       resticPassword,
 			"AWS_ACCESS_KEY_ID":     string(credSecret.Data["access-key-id"]),
 			"AWS_SECRET_ACCESS_KEY": string(credSecret.Data["secret-access-key"]),
 		}
 		return nil
 	})
 	return err
+}
+
+// resolveResticPassword returns the restic encryption password for a PVC backup.
+// Resolution order:
+//  1. If BackupStore.spec.s3.resticPasswordSecretRef is set, read that secret+key.
+//  2. Otherwise fall back to the key "restic-password" inside credentialsSecret.
+func (b *Backend) resolveResticPassword(ctx context.Context, params backend.EnsureParams, credSecret *corev1.Secret) (string, error) {
+	ref := params.Store.Spec.S3.ResticPasswordSecretRef
+	if ref != nil {
+		// Explicit secret reference — use the credentials secret's namespace as the
+		// lookup namespace (SecretKeySelector has no Namespace field).
+		ns := params.Store.Spec.S3.CredentialsSecret.Namespace
+		s := &corev1.Secret{}
+		if err := b.client.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, s); err != nil {
+			return "", fmt.Errorf("get resticPasswordSecretRef %q/%q: %w", ns, ref.Name, err)
+		}
+		pw, ok := s.Data[ref.Key]
+		if !ok {
+			return "", fmt.Errorf("resticPasswordSecretRef secret %q/%q has no key %q", ns, ref.Name, ref.Key)
+		}
+		return string(pw), nil
+	}
+
+	// Fallback: "restic-password" key in the credentials secret.
+	pw, ok := credSecret.Data["restic-password"]
+	if !ok {
+		return "", fmt.Errorf("credentialsSecret %q/%q has no key %q and resticPasswordSecretRef is not set",
+			params.Store.Spec.S3.CredentialsSecret.Namespace,
+			params.Store.Spec.S3.CredentialsSecret.Name,
+			"restic-password")
+	}
+	return string(pw), nil
 }
 
 // buildResticRetainPolicy converts omnivol RetainPolicy to VolSync ResticRetainPolicy.
