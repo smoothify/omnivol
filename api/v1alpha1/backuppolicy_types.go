@@ -63,10 +63,9 @@ type BackupPolicySpec struct {
 	RestoreOnCreate bool `json:"restoreOnCreate,omitempty"`
 
 	// deleteTimeout is the maximum duration to wait for a final pre-delete backup
-	// to complete before forcibly removing the PVC.  Defaults to "5m".
+	// to complete before forcibly removing the PVC.  Defaults to 5 minutes if not set.
 	// +optional
-	// +kubebuilder:default="5m"
-	DeleteTimeout string `json:"deleteTimeout,omitempty"`
+	DeleteTimeout *metav1.Duration `json:"deleteTimeout,omitempty"`
 
 	// repositoryPath is the default restic repository path prefix inside the bucket.
 	// Individual PVCs may override via the omnivol.smoothify.com/repository-path annotation.

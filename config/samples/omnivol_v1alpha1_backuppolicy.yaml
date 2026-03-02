@@ -27,4 +27,4 @@ spec:
   restoreOnCreate: true
 
   # Maximum time to wait for a final pre-delete backup before forcibly removing the PVC.
-  deleteTimeout: 5m
+  deleteTimeout: 5m0s

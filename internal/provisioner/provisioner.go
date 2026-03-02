@@ -398,15 +398,11 @@ func (p *OmnivolProvisioner) resolveDeleteTimeout(ctx context.Context, pv *corev
 		return defaultDeleteTimeout
 	}
 
-	if policy.Spec.DeleteTimeout == "" {
+	if policy.Spec.DeleteTimeout == nil {
 		return defaultDeleteTimeout
 	}
 
-	d, err := time.ParseDuration(policy.Spec.DeleteTimeout)
-	if err != nil {
-		return defaultDeleteTimeout
-	}
-	return d
+	return policy.Spec.DeleteTimeout.Duration
 }
 
 // reclaimPolicyOrDefault safely dereferences a *PersistentVolumeReclaimPolicy,

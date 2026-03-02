@@ -79,10 +79,9 @@ spec:
                 - Direct
                 type: string
               deleteTimeout:
-                default: 5m
                 description: |-
                   deleteTimeout is the maximum duration to wait for a final pre-delete backup
-                  to complete before forcibly removing the PVC.  Defaults to "5m".
+                  to complete before forcibly removing the PVC.  Defaults to 5 minutes if not set.
                 type: string
               repositoryPath:
                 description: |-
