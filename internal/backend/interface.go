@@ -91,4 +91,8 @@ type EnsureParams struct {
 
 	// UserPVCNamespace is the namespace of the user-facing PVC.
 	UserPVCNamespace string
+
+	// ControllerNamespace is the namespace where the omnivol controller runs.
+	// Credential secrets referenced by BackupStore are resolved in this namespace.
+	ControllerNamespace string
 }

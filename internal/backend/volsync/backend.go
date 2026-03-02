@@ -277,11 +277,11 @@ func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureP
 	}
 	repoURL := fmt.Sprintf("%s:%s/%s/%s", scheme, store.Endpoint, store.Bucket, params.RepoPath)
 
-	// Read credentials from the BackupStore's referenced Secret.
+	// Read credentials from the BackupStore's referenced Secret in the controller namespace.
 	credSecret := &corev1.Secret{}
 	if err := b.client.Get(ctx, types.NamespacedName{
-		Name:      store.CredentialsSecret.Name,
-		Namespace: store.CredentialsSecret.Namespace,
+		Name:      store.CredentialsSecret,
+		Namespace: params.ControllerNamespace,
 	}, credSecret); err != nil {
 		return fmt.Errorf("get BackupStore credentials secret: %w", err)
 	}
@@ -330,9 +330,8 @@ func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureP
 func (b *Backend) resolveResticPassword(ctx context.Context, params backend.EnsureParams, credSecret *corev1.Secret) (string, error) {
 	ref := params.Store.Spec.S3.ResticPasswordSecretRef
 	if ref != nil {
-		// Explicit secret reference — use the credentials secret's namespace as the
-		// lookup namespace (SecretKeySelector has no Namespace field).
-		ns := params.Store.Spec.S3.CredentialsSecret.Namespace
+		// Explicit secret reference — resolve in the controller namespace.
+		ns := params.ControllerNamespace
 		s := &corev1.Secret{}
 		if err := b.client.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, s); err != nil {
 			return "", fmt.Errorf("get resticPasswordSecretRef %q/%q: %w", ns, ref.Name, err)
@@ -348,8 +347,8 @@ func (b *Backend) resolveResticPassword(ctx context.Context, params backend.Ensu
 	pw, ok := credSecret.Data["restic-password"]
 	if !ok {
 		return "", fmt.Errorf("credentialsSecret %q/%q has no key %q and resticPasswordSecretRef is not set",
-			params.Store.Spec.S3.CredentialsSecret.Namespace,
-			params.Store.Spec.S3.CredentialsSecret.Name,
+			params.ControllerNamespace,
+			params.Store.Spec.S3.CredentialsSecret,
 			"restic-password")
 	}
 	return string(pw), nil
@@ -390,8 +389,8 @@ func S3CheckBackupExists(ctx context.Context, params backend.EnsureParams, repoP
 
 	credSecret := &corev1.Secret{}
 	if err := params.Client.Get(ctx, types.NamespacedName{
-		Name:      store.CredentialsSecret.Name,
-		Namespace: store.CredentialsSecret.Namespace,
+		Name:      store.CredentialsSecret,
+		Namespace: params.ControllerNamespace,
 	}, credSecret); err != nil {
 		return false, fmt.Errorf("get credentials secret: %w", err)
 	}

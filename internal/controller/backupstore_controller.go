@@ -50,6 +50,8 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 type BackupStoreReconciler struct {
 	client.Client
+	// Namespace is the controller namespace where credential secrets are resolved.
+	Namespace string
 }
 
 // SetupWithManager registers the BackupStoreReconciler with the controller manager.
@@ -65,7 +67,9 @@ func (r *BackupStoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			var requests []reconcile.Request
 			for _, store := range storeList.Items {
 				ref := store.Spec.S3.CredentialsSecret
-				if ref.Name == obj.GetName() && ref.Namespace == obj.GetNamespace() {
+				// Only re-reconcile when the changed Secret is in the controller
+				// namespace and its name matches the BackupStore's credentialsSecret.
+				if ref == obj.GetName() && obj.GetNamespace() == r.Namespace {
 					requests = append(requests, reconcile.Request{
 						NamespacedName: types.NamespacedName{Name: store.Name},
 					})
@@ -96,17 +100,17 @@ func (r *BackupStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logger.Info("Reconciling BackupStore", "name", store.Name)
 
-	// Load the credentials secret.
+	// Load the credentials secret from the controller namespace.
 	credSecret := &corev1.Secret{}
-	credRef := store.Spec.S3.CredentialsSecret
+	credName := store.Spec.S3.CredentialsSecret
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      credRef.Name,
-		Namespace: credRef.Namespace,
+		Name:      credName,
+		Namespace: r.Namespace,
 	}, credSecret); err != nil {
 		reason := "CredentialsSecretNotFound"
-		msg := fmt.Sprintf("Could not read credentials secret %s/%s: %v", credRef.Namespace, credRef.Name, err)
+		msg := fmt.Sprintf("Could not read credentials secret %s/%s: %v", r.Namespace, credName, err)
 		if apierrors.IsNotFound(err) {
-			msg = fmt.Sprintf("Credentials secret %s/%s not found", credRef.Namespace, credRef.Name)
+			msg = fmt.Sprintf("Credentials secret %s/%s not found", r.Namespace, credName)
 		}
 		return ctrl.Result{}, r.setReadyCondition(ctx, store, metav1.ConditionFalse, reason, msg)
 	}

@@ -9,13 +9,12 @@ spec:
     bucket: my-volsync-backups
     region: us-east-1
     tls: true
-    # credentialsSecret must exist in the same namespace as the omnivol manager
+    # credentialsSecret is the name of a Secret in the controller namespace
     # (omnivol-system by default). Keys required: access-key-id, secret-access-key.
     # Optionally add a restic-password key here if resticPasswordSecretRef is not set.
-    credentialsSecret:
-      name: omnivol-s3-credentials
-      namespace: omnivol-system
+    credentialsSecret: omnivol-s3-credentials
     # Optional: reference a different secret/key for the restic encryption password.
+    # The secret is also resolved in the controller namespace.
     # If omitted, the controller reads key "restic-password" from credentialsSecret.
     # resticPasswordSecretRef:
     #   name: omnivol-s3-credentials

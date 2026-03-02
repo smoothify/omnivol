@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,6 +27,20 @@ type BackupStoreSpec struct {
 	// s3 contains the S3-compatible storage configuration.
 	// +required
 	S3 S3Config `json:"s3"`
+}
+
+// SecretKeyRef references a key within a named Secret.
+// The Secret is always resolved in the controller namespace (omnivol-system).
+type SecretKeyRef struct {
+	// name is the name of the Secret.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// key is the key within the Secret.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
 }
 
 // S3Config holds the connection details for an S3-compatible backup store.
@@ -53,17 +66,18 @@ type S3Config struct {
 	// +kubebuilder:default=true
 	TLS bool `json:"tls,omitempty"`
 
-	// credentialsSecret is a reference to a Secret containing the access key and
-	// secret key for the S3 bucket.  The Secret must contain the keys
-	// "access-key-id" and "secret-access-key".
+	// credentialsSecret is the name of a Secret (in the controller namespace) containing
+	// the keys "access-key-id" and "secret-access-key" for the S3 bucket.
+	// Optionally include a "restic-password" key as the fallback restic encryption password.
 	// +required
-	CredentialsSecret corev1.SecretReference `json:"credentialsSecret"`
+	// +kubebuilder:validation:MinLength=1
+	CredentialsSecret string `json:"credentialsSecret"`
 
-	// resticPasswordSecretRef references the secret key that holds the restic
-	// repository encryption password.  If omitted the controller will look for
-	// a key named "restic-password" inside credentialsSecret.
+	// resticPasswordSecretRef references a specific Secret and key that holds the restic
+	// repository encryption password.  The Secret is resolved in the controller namespace.
+	// If omitted the controller reads key "restic-password" from credentialsSecret.
 	// +optional
-	ResticPasswordSecretRef *corev1.SecretKeySelector `json:"resticPasswordSecretRef,omitempty"`
+	ResticPasswordSecretRef *SecretKeyRef `json:"resticPasswordSecretRef,omitempty"`
 }
 
 // BackupStoreStatus defines the observed state of BackupStore.

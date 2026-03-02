@@ -66,15 +66,17 @@ const (
 
 // OmnivolProvisioner implements the external provisioner interface.
 type OmnivolProvisioner struct {
-	client  client.Client
-	backend backend.Interface
+	client       client.Client
+	backend      backend.Interface
+	controllerNS string
 }
 
 // New creates a new OmnivolProvisioner.
-func New(c client.Client) *OmnivolProvisioner {
+func New(c client.Client, controllerNS string) *OmnivolProvisioner {
 	return &OmnivolProvisioner{
-		client:  c,
-		backend: volsyncbackend.New(c),
+		client:       c,
+		backend:      volsyncbackend.New(c),
+		controllerNS: controllerNS,
 	}
 }
 
@@ -129,15 +131,16 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 	}
 
 	params := backend.EnsureParams{
-		Client:           p.client,
-		Policy:           policy,
-		Store:            store,
-		UnderlyingPVC:    underlyingPVC,
-		RepoPath:         repoPath,
-		Schedule:         schedule,
-		ResticSecretName: resticSecretName,
-		UserPVCName:      pvc.Name,
-		UserPVCNamespace: pvc.Namespace,
+		Client:              p.client,
+		Policy:              policy,
+		Store:               store,
+		UnderlyingPVC:       underlyingPVC,
+		RepoPath:            repoPath,
+		Schedule:            schedule,
+		ResticSecretName:    resticSecretName,
+		UserPVCName:         pvc.Name,
+		UserPVCNamespace:    pvc.Namespace,
+		ControllerNamespace: p.controllerNS,
 	}
 
 	// 7. Check S3 for existing backup.

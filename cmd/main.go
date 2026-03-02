@@ -185,8 +185,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Resolve the controller namespace for scoping credential secret lookups.
+	controllerNS := os.Getenv("POD_NAMESPACE")
+	if controllerNS == "" {
+		controllerNS = "omnivol-system"
+		setupLog.Info("POD_NAMESPACE not set, defaulting controller namespace", "namespace", controllerNS)
+	}
+
 	if err := (&controller.BackupStoreReconciler{
-		Client: mgr.GetClient(),
+		Client:    mgr.GetClient(),
+		Namespace: controllerNS,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up BackupStore controller")
 		os.Exit(1)
@@ -228,7 +236,7 @@ func main() {
 	// The provisioner uses the manager's client which is only ready after Start(),
 	// so we launch it in a goroutine gated on the cache being synced.
 	ctx := ctrl.SetupSignalHandler()
-	prov := provisioner.New(mgr.GetClient())
+	prov := provisioner.New(mgr.GetClient(), controllerNS)
 	kubeClient, err := kubeClientset(mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "Failed to create kubernetes clientset")
