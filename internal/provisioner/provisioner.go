@@ -107,13 +107,13 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 
 	// 4. Wait for underlying PVC to bind.
 	if underlyingPVC.Status.Phase != corev1.ClaimBound {
-		return nil, provisioner.ProvisioningInBackground, nil
+		return nil, provisioner.ProvisioningInBackground, fmt.Errorf("waiting for underlying PVC %s/%s to bind", underlyingNS, underlyingName)
 	}
 
 	// 5. Read underlying PV to copy nodeAffinity + volumeHandle.
 	underlyingPV := &corev1.PersistentVolume{}
 	if err := p.client.Get(ctx, types.NamespacedName{Name: underlyingPVC.Spec.VolumeName}, underlyingPV); err != nil {
-		return nil, provisioner.ProvisioningInBackground, nil // PV might not be visible yet
+		return nil, provisioner.ProvisioningInBackground, fmt.Errorf("waiting for underlying PV %s: %w", underlyingPVC.Spec.VolumeName, err)
 	}
 
 	// 6. Build the restic Secret name and effective repo path.
