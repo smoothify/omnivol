@@ -129,6 +129,9 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 				CacheStorageClassName: &params.Policy.Spec.StorageClassName,
 				CacheAccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				CacheCapacity:         ptr(resource.MustParse("1Gi")),
+				// TODO: When VolSync adds Tolerations support to MoverConfig,
+				// add node.kubernetes.io/unschedulable:NoSchedule toleration
+				// so the mover pod can run on cordoned/draining nodes.
 				MoverConfig: volsyncv1alpha1.MoverConfig{
 					MoverAffinity: buildMoverNodeAffinity(params.NodeName),
 				},

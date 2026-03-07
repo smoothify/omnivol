@@ -214,6 +214,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.PodReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up Pod backup-protection controller")
+		os.Exit(1)
+	}
+
 	if err := (&drain.Watcher{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {

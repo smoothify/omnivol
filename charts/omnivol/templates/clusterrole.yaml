@@ -40,6 +40,14 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
 
+  # Pods — backup-protection finalizer controller
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/finalizers"]
+    verbs: ["update"]
+
   # omnivol CRDs
   - apiGroups: ["omnivol.smoothify.com"]
     resources: ["backuppolicies", "backupstores"]

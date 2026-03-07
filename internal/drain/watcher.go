@@ -126,14 +126,16 @@ func (w *Watcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 	return ctrl.Result{}, nil
 }
 
-// pvPinnedToNode returns true when the PV's node affinity matches exactly nodeName.
+// pvPinnedToNode returns true when the PV's node affinity matches nodeName.
+// It checks all topology keys (works with kubernetes.io/hostname,
+// topology.topolvm.io/node, openebs.io/nodename, etc.).
 func pvPinnedToNode(pv *corev1.PersistentVolume, nodeName string) bool {
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		return false
 	}
 	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
 		for _, expr := range term.MatchExpressions {
-			if expr.Key == "kubernetes.io/hostname" && slices.Contains(expr.Values, nodeName) {
+			if expr.Operator == corev1.NodeSelectorOpIn && slices.Contains(expr.Values, nodeName) {
 				return true
 			}
 		}
