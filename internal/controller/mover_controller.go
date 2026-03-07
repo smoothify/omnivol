@@ -28,10 +28,13 @@ import (
 )
 
 const (
-	// labelMoverPod is applied to VolSync mover pods via MoverPodLabels
-	// in the ReplicationSource spec.  The MoverReconciler watches for
-	// pods carrying this label and injects the cordon toleration.
-	labelMoverPod = "omnivol.smoothify.com/mover"
+	// labelMoverPod is applied to VolSync mover pods by the VolSync operator.
+	// The MoverReconciler watches for pods carrying this label and injects
+	// the cordon toleration.
+	labelMoverPod = "app.kubernetes.io/created-by"
+
+	// labelMoverPodValue is the expected value for the labelMoverPod.
+	labelMoverPodValue = "volsync"
 
 	// annTolerationPatched marks a pod as already patched so we don't
 	// re-patch on every reconcile.
@@ -63,9 +66,9 @@ func (r *MoverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// enqueueIfMover only enqueues pods that carry the omnivol mover label.
+// enqueueIfMover only enqueues pods that carry the volsync created-by label.
 func enqueueIfMover(_ context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetLabels()[labelMoverPod] != annValueTrue {
+	if obj.GetLabels()[labelMoverPod] != labelMoverPodValue {
 		return nil
 	}
 	return []reconcile.Request{{
@@ -84,7 +87,7 @@ func (r *MoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	// Skip if already patched or not a mover pod.
-	if pod.Labels[labelMoverPod] != annValueTrue {
+	if pod.Labels[labelMoverPod] != labelMoverPodValue {
 		return ctrl.Result{}, nil
 	}
 	if pod.Annotations[annTolerationPatched] == annValueTrue {

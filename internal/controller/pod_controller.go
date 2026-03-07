@@ -150,7 +150,28 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{RequeueAfter: podRequeueInterval}, nil
 	}
 
-	// All syncs complete — remove the finalizer.
+	// All syncs complete — now check if we should delete the user PVCs.
+	for _, pvcName := range omnivolPVCNames {
+		deleteEnabled, err := r.isDeletePVCOnBackupEnabled(ctx, pod, pvcName)
+		if err != nil {
+			logger.Error(err, "Failed to check if PVC should be deleted", "pvc", pvcName)
+			continue
+		}
+		if deleteEnabled {
+			logger.Info("Deleting PVC after final backup (opt-in)", "pvc", pvcName)
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: ctrl.ObjectMeta{
+					Name:      pvcName,
+					Namespace: pod.Namespace,
+				},
+			}
+			if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete PVC", "pvc", pvcName)
+			}
+		}
+	}
+
+	// All syncs complete and PVCs handled — remove the finalizer.
 	logger.Info("Final sync complete — removing backup-protection finalizer", "pod", pod.Name)
 	controllerutil.RemoveFinalizer(pod, finalizerBackupProtection)
 	if err := r.Update(ctx, pod); err != nil {
@@ -158,6 +179,42 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// isDeletePVCOnBackupEnabled checks the annotation hierarchy: Pod > PVC > StorageClass.
+// Default is false (opt-in only).
+func (r *PodReconciler) isDeletePVCOnBackupEnabled(ctx context.Context, pod *corev1.Pod, pvcName string) (bool, error) {
+	annDeletePVCOnBackup := "omnivol.smoothify.com/delete-pvc-after-backup"
+
+	// Check Pod annotation first.
+	if v, ok := pod.Annotations[annDeletePVCOnBackup]; ok {
+		return v == annValueTrue, nil
+	}
+
+	// Check PVC annotation.
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: pod.Namespace}, pvc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if v, ok := pvc.Annotations[annDeletePVCOnBackup]; ok {
+		return v == annValueTrue, nil
+	}
+
+	// Check StorageClass annotation.
+	if pvc.Spec.StorageClassName != nil {
+		sc := &storagev1.StorageClass{}
+		if err := r.Get(ctx, types.NamespacedName{Name: *pvc.Spec.StorageClassName}, sc); err == nil {
+			if v, ok := sc.Annotations[annDeletePVCOnBackup]; ok {
+				return v == annValueTrue, nil
+			}
+		}
+	}
+
+	// Default: disabled.
+	return false, nil
 }
 
 // omnivolPVCsForPod returns the names of PVCs used by the Pod whose StorageClass
