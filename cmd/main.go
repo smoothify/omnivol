@@ -221,6 +221,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.MoverReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up Mover toleration controller")
+		os.Exit(1)
+	}
+
 	if err := (&drain.Watcher{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
