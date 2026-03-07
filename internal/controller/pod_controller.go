@@ -67,7 +67,7 @@ const (
 //
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;update;patch
 type PodReconciler struct {
@@ -167,7 +167,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			continue
 		}
 		if deleteEnabled {
-			logger.Info("Deleting PVC after final backup (opt-in)", "pvc", pvcName)
+			logger.Info("Deleting PVC after final backup", "pvc", pvcName)
 			pvc := &corev1.PersistentVolumeClaim{
 				ObjectMeta: ctrl.ObjectMeta{
 					Name:      pvcName,
@@ -176,6 +176,20 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 			if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
 				logger.Error(err, "Failed to delete PVC", "pvc", pvcName)
+			}
+
+			// Also delete the underlying PVC to prevent stale node
+			// bindings when the StatefulSet recreates the user PVC.
+			underlyingName := pvcName + podUnderlyingSuffix
+			logger.Info("Deleting underlying PVC", "pvc", underlyingName)
+			underlyingPVC := &corev1.PersistentVolumeClaim{
+				ObjectMeta: ctrl.ObjectMeta{
+					Name:      underlyingName,
+					Namespace: pod.Namespace,
+				},
+			}
+			if err := r.Delete(ctx, underlyingPVC); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete underlying PVC", "pvc", underlyingName)
 			}
 		}
 	}
