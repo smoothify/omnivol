@@ -272,7 +272,7 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 		if err := b.client.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ns}, current); err != nil {
 			return false, client.IgnoreNotFound(err)
 		}
-		if current.Status.LatestImage != nil {
+		if current.Status != nil && current.Status.LatestImage != nil {
 			latestImage = current.Status.LatestImage
 			return true, nil
 		}

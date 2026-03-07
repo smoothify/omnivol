@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -251,9 +252,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start the external provisioner controller alongside the manager.
-	// The provisioner uses the manager's client which is only ready after Start(),
-	// so we launch it in a goroutine gated on the cache being synced.
+	// Wait for cache sync before starting the provisioner.
+	// The provisioner uses the manager's client which is only ready after Start().
+	// We wrap it in a manager.Runnable so it runs exactly when the manager is elected leader.
 	ctx := ctrl.SetupSignalHandler()
 	prov := provisioner.New(mgr.GetClient(), mgr.GetAPIReader(), controllerNS)
 	kubeClient, err := kubeClientset(mgr.GetConfig())
@@ -266,22 +267,32 @@ func main() {
 		kubeClient,
 		provisioner.ProvisionerName,
 		prov,
+		sigprovisioner.LeaderElection(false), // Rely entirely on controller-runtime's leader election
 	)
-	go func() {
-		setupLog.Info("Waiting for cache sync before starting provisioner")
-		if !mgr.GetCache().WaitForCacheSync(ctx) {
-			setupLog.Error(nil, "Cache did not sync")
-			os.Exit(1)
-		}
-		setupLog.Info("Starting external provisioner")
-		pc.Run(ctx)
-	}()
+
+	if err := mgr.Add(&provisionerRunnable{pc: pc}); err != nil {
+		setupLog.Error(err, "Failed to add provisioner controller to manager")
+		os.Exit(1)
+	}
 
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// provisionerRunnable wraps the external provisioner so it can be managed by controller-runtime.
+type provisionerRunnable struct {
+	pc *sigprovisioner.ProvisionController
+}
+
+// Start runs the provisioner. The controller manager's leader election guarantees this
+// is only called when the manager is elected leader.
+func (r *provisionerRunnable) Start(ctx context.Context) error {
+	setupLog.Info("Starting external provisioner")
+	r.pc.Run(ctx)
+	return nil
 }
 
 // kubeClientset builds a typed Kubernetes clientset from the manager's rest.Config.
