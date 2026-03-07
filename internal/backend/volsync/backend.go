@@ -164,7 +164,30 @@ func (b *Backend) ensureCachePVC(ctx context.Context, params backend.EnsureParam
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, b.client, pvc, func() error {
+	// Check if the cache PVC already exists and is bound to the wrong node.
+	// This happens when a StatefulSet pod moves to a new node, but the old cache
+	// PVC (from a previous backup) still exists on the old node.
+	err := b.client.Get(ctx, types.NamespacedName{Name: cacheName, Namespace: ns}, pvc)
+	if err == nil {
+		selectedNode := pvc.Annotations["volume.kubernetes.io/selected-node"]
+		if selectedNode != "" && selectedNode != params.NodeName {
+			// Stale cache PVC bound to the wrong node. Delete it.
+			if err := b.client.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete stale cache PVC %q: %w", cacheName, err)
+			}
+			// Reset the PVC object for CreateOrUpdate
+			pvc = &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      cacheName,
+					Namespace: ns,
+				},
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get cache PVC %q: %w", cacheName, err)
+	}
+
+	_, err = controllerutil.CreateOrUpdate(ctx, b.client, pvc, func() error {
 		// Only set fields on creation — don't overwrite if VolSync has
 		// already taken ownership and mutated the PVC.
 		if pvc.CreationTimestamp.IsZero() {
