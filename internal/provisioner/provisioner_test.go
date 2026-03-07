@@ -146,11 +146,10 @@ func TestResolveDeleteTimeout_FromPolicy(t *testing.T) {
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 		Spec: omniv1alpha1.BackupPolicySpec{
-			DeleteTimeout:    &timeout,
-			BackupStore:      "s",
-			StorageClassName: "sc",
-			Schedule:         "0 * * * *",
-			CopyMethod:       "Direct",
+			DeleteTimeout: &timeout,
+			BackupStore:   "s",
+			Schedule:      "0 * * * *",
+			CopyMethod:    "Direct",
 		},
 	}
 	sc := &storagev1.StorageClass{
@@ -175,10 +174,9 @@ func TestResolveDeleteTimeout_DefaultWhenPolicyHasNoTimeout(t *testing.T) {
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore:      "s",
-			StorageClassName: "sc",
-			Schedule:         "0 * * * *",
-			CopyMethod:       "Direct",
+			BackupStore: "s",
+			Schedule:    "0 * * * *",
+			CopyMethod:  "Direct",
 		},
 	}
 	sc := &storagev1.StorageClass{
@@ -291,10 +289,9 @@ func TestResolvePolicy_Success(t *testing.T) {
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore:      "default-store",
-			StorageClassName: "openebs-lvm",
-			Schedule:         "0 * * * *",
-			CopyMethod:       "Direct",
+			BackupStore: "default-store",
+			Schedule:    "0 * * * *",
+			CopyMethod:  "Direct",
 		},
 	}
 

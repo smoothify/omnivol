@@ -96,6 +96,10 @@ type EnsureParams struct {
 	// Credential secrets referenced by BackupStore are resolved in this namespace.
 	ControllerNamespace string
 
+	// UnderlyingStorageClassName is the name of the real StorageClass (e.g. openebs-lvm)
+	// that backs the omnivol PVC.  Read from the omnivol StorageClass parameters.
+	UnderlyingStorageClassName string
+
 	// NodeName is the node the underlying PV resides on.  Used to pin the
 	// VolSync mover pod (and its cache PVC) to the correct node.
 	NodeName string

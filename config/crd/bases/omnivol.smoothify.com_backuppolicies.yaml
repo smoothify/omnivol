@@ -129,18 +129,11 @@ spec:
                   Example: "0 * * * *" (hourly), "0 2 * * *" (daily at 2am).
                 minLength: 1
                 type: string
-              storageClassName:
-                description: |-
-                  storageClassName is the name of the underlying StorageClass used to
-                  provision the real openebs-lvm PVC.
-                minLength: 1
-                type: string
             required:
             - backupStore
             - copyMethod
             - retain
             - schedule
-            - storageClassName
             type: object
           status:
             description: status defines the observed state of BackupPolicy.

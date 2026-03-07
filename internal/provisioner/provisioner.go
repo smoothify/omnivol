@@ -47,8 +47,9 @@ const (
 	annUnderlyingPVC = "omnivol.smoothify.com/underlying-pvc"
 	annUnderlyingNS  = "omnivol.smoothify.com/underlying-namespace"
 
-	// StorageClass parameter key.
-	paramBackupPolicy = "backupPolicy"
+	// StorageClass parameter keys.
+	paramBackupPolicy           = "backupPolicy"
+	paramUnderlyingStorageClass = "underlyingStorageClass"
 
 	// Annotation keys that users may set on PVCs.
 	annScheduleOverride = "omnivol.smoothify.com/schedule"
@@ -94,6 +95,12 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 		return nil, provisioner.ProvisioningFinished, fmt.Errorf("resolve policy: %w", err)
 	}
 
+	// Read the underlying StorageClass from the omnivol SC parameters.
+	underlyingSC := sc.Parameters[paramUnderlyingStorageClass]
+	if underlyingSC == "" {
+		return nil, provisioner.ProvisioningFinished, fmt.Errorf("StorageClass %q missing required parameter %q", sc.Name, paramUnderlyingStorageClass)
+	}
+
 	underlyingName := pvc.Name + underlyingSuffix
 	underlyingNS := pvc.Namespace
 
@@ -102,7 +109,7 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 	err = p.client.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: underlyingNS}, underlyingPVC)
 	if apierrors.IsNotFound(err) {
 		// 3. Create underlying PVC.
-		underlyingPVC, err = p.createUnderlyingPVC(ctx, pvc, policy, underlyingName)
+		underlyingPVC, err = p.createUnderlyingPVC(ctx, pvc, underlyingSC, underlyingName)
 		if err != nil {
 			return nil, provisioner.ProvisioningFinished, fmt.Errorf("create underlying PVC: %w", err)
 		}
@@ -165,17 +172,18 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 	}
 
 	params := backend.EnsureParams{
-		Client:              p.client,
-		Policy:              policy,
-		Store:               store,
-		UnderlyingPVC:       underlyingPVC,
-		RepoPath:            repoPath,
-		Schedule:            schedule,
-		ResticSecretName:    resticSecretName,
-		UserPVCName:         pvc.Name,
-		UserPVCNamespace:    pvc.Namespace,
-		ControllerNamespace: p.controllerNS,
-		NodeName:            nodeNameFromPV(underlyingPV),
+		Client:                     p.client,
+		Policy:                     policy,
+		Store:                      store,
+		UnderlyingPVC:              underlyingPVC,
+		RepoPath:                   repoPath,
+		Schedule:                   schedule,
+		ResticSecretName:           resticSecretName,
+		UserPVCName:                pvc.Name,
+		UserPVCNamespace:           pvc.Namespace,
+		ControllerNamespace:        p.controllerNS,
+		UnderlyingStorageClassName: underlyingSC,
+		NodeName:                   nodeNameFromPV(underlyingPV),
 	}
 
 	// 7. Check S3 for existing backup.
@@ -262,10 +270,10 @@ func (p *OmnivolProvisioner) resolvePolicy(ctx context.Context, sc *storagev1.St
 func (p *OmnivolProvisioner) createUnderlyingPVC(
 	ctx context.Context,
 	pvc *corev1.PersistentVolumeClaim,
-	policy *omniv1alpha1.BackupPolicy,
+	underlyingSC string,
 	underlyingName string,
 ) (*corev1.PersistentVolumeClaim, error) {
-	sc := policy.Spec.StorageClassName
+	sc := underlyingSC
 	underlying := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      underlyingName,

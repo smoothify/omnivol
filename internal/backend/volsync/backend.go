@@ -119,14 +119,14 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 			Restic: &volsyncv1alpha1.ReplicationSourceResticSpec{
 				ReplicationSourceVolumeOptions: volsyncv1alpha1.ReplicationSourceVolumeOptions{
 					CopyMethod:              copyMethod,
-					StorageClassName:        &params.Policy.Spec.StorageClassName,
-					VolumeSnapshotClassName: &params.Policy.Spec.StorageClassName,
+					StorageClassName:        &params.UnderlyingStorageClassName,
+					VolumeSnapshotClassName: &params.UnderlyingStorageClassName,
 					AccessModes:             params.UnderlyingPVC.Spec.AccessModes,
 				},
 				Repository:            params.ResticSecretName,
 				Retain:                buildResticRetainPolicy(params),
 				PruneIntervalDays:     ptr(int32(7)),
-				CacheStorageClassName: &params.Policy.Spec.StorageClassName,
+				CacheStorageClassName: &params.UnderlyingStorageClassName,
 				CacheAccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				CacheCapacity:         ptr(resource.MustParse("1Gi")),
 				MoverConfig: volsyncv1alpha1.MoverConfig{
@@ -195,7 +195,7 @@ func (b *Backend) ensureCachePVC(ctx context.Context, params backend.EnsureParam
 				"volume.kubernetes.io/selected-node": params.NodeName,
 			}
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
-				StorageClassName: &params.Policy.Spec.StorageClassName,
+				StorageClassName: &params.UnderlyingStorageClassName,
 				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -253,7 +253,7 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 					CopyMethod:       copyMethod,
 					AccessModes:      params.UnderlyingPVC.Spec.AccessModes,
 					Capacity:         &capacity,
-					StorageClassName: &params.Policy.Spec.StorageClassName,
+					StorageClassName: &params.UnderlyingStorageClassName,
 					DestinationPVC:   &pvcName,
 				},
 				Repository: params.ResticSecretName,

@@ -29,12 +29,6 @@ type BackupPolicySpec struct {
 	// +kubebuilder:validation:MinLength=1
 	BackupStore string `json:"backupStore"`
 
-	// storageClassName is the name of the underlying StorageClass used to
-	// provision the real openebs-lvm PVC.
-	// +required
-	// +kubebuilder:validation:MinLength=1
-	StorageClassName string `json:"storageClassName"`
-
 	// schedule is the default cron expression for backups.
 	// Individual PVCs may override this via the omnivol.smoothify.com/schedule annotation.
 	// The minute field will be staggered deterministically based on the PVC UID —

@@ -6,9 +6,6 @@ spec:
   # Name of the BackupStore that provides the S3 endpoint and credentials.
   backupStore: default-store
 
-  # The underlying StorageClass used to provision the real PVC (e.g. openebs-lvm).
-  storageClassName: openebs-lvm
-
   # Default backup schedule (cron). The minute field is replaced at provision time
   # with a deterministic per-PVC offset to spread load across the hour.
   schedule: "0 * * * *"

@@ -46,10 +46,9 @@ func newTestParams(controllerNS string) backend.EnsureParams {
 		Policy: &omniv1alpha1.BackupPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 			Spec: omniv1alpha1.BackupPolicySpec{
-				Schedule:         "0 * * * *",
-				CopyMethod:       "Direct",
-				BackupStore:      "default-store",
-				StorageClassName: "openebs-lvm",
+				Schedule:    "0 * * * *",
+				CopyMethod:  "Direct",
+				BackupStore: "default-store",
 				Retain: omniv1alpha1.RetainPolicy{
 					Hourly:  ptr(int32(6)),
 					Daily:   ptr(int32(5)),
@@ -73,12 +72,13 @@ func newTestParams(controllerNS string) backend.EnsureParams {
 		UnderlyingPVC: &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: "data-omnivol", Namespace: "prod"},
 		},
-		RepoPath:            "prod/data",
-		Schedule:            "42 * * * *",
-		ResticSecretName:    "omnivol-data",
-		UserPVCName:         "data",
-		UserPVCNamespace:    "prod",
-		ControllerNamespace: controllerNS,
+		RepoPath:                   "prod/data",
+		Schedule:                   "42 * * * *",
+		ResticSecretName:           "omnivol-data",
+		UserPVCName:                "data",
+		UserPVCNamespace:           "prod",
+		ControllerNamespace:        controllerNS,
+		UnderlyingStorageClassName: "openebs-lvm",
 	}
 }
 

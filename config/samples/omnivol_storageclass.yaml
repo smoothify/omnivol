@@ -6,6 +6,8 @@ provisioner: omnivol.smoothify.com/provisioner
 parameters:
   # Name of the BackupPolicy (cluster-scoped) that governs PVCs using this StorageClass.
   backupPolicy: hourly
+  # Name of the underlying StorageClass used to provision the real PVC (e.g. openebs-lvm).
+  underlyingStorageClass: openebs-lvm
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true

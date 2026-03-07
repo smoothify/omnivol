@@ -108,10 +108,9 @@ func TestBackupPolicyReconciler_StoreNotFound(t *testing.T) {
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore:      "missing-store",
-			StorageClassName: "openebs-lvm",
-			Schedule:         "0 * * * *",
-			CopyMethod:       "Direct",
+			BackupStore: "missing-store",
+			Schedule:    "0 * * * *",
+			CopyMethod:  "Direct",
 		},
 	}
 
@@ -163,10 +162,9 @@ func TestBackupPolicyReconciler_StoreNotReady(t *testing.T) {
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore:      "default-store",
-			StorageClassName: "openebs-lvm",
-			Schedule:         "0 * * * *",
-			CopyMethod:       "Direct",
+			BackupStore: "default-store",
+			Schedule:    "0 * * * *",
+			CopyMethod:  "Direct",
 		},
 	}
 
@@ -218,10 +216,9 @@ func TestBackupPolicyReconciler_ReadyWithPVCCount(t *testing.T) {
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
 		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore:      "default-store",
-			StorageClassName: "openebs-lvm",
-			Schedule:         "0 * * * *",
-			CopyMethod:       "Direct",
+			BackupStore: "default-store",
+			Schedule:    "0 * * * *",
+			CopyMethod:  "Direct",
 		},
 	}
 	// StorageClass using the omnivol provisioner with this policy.
