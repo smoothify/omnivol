@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	provisioner "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
@@ -63,14 +64,18 @@ const (
 // OmnivolProvisioner implements the external provisioner interface.
 type OmnivolProvisioner struct {
 	client       client.Client
+	apiReader    client.Reader
 	backend      backend.Interface
 	controllerNS string
 }
 
-// New creates a new OmnivolProvisioner.
-func New(c client.Client, controllerNS string) *OmnivolProvisioner {
+// New creates a new OmnivolProvisioner.  The apiReader should be an uncached
+// reader (e.g. mgr.GetAPIReader()) so we can read the latest PVC annotations
+// that may not yet be reflected in the informer cache.
+func New(c client.Client, apiReader client.Reader, controllerNS string) *OmnivolProvisioner {
 	return &OmnivolProvisioner{
 		client:       c,
+		apiReader:    apiReader,
 		backend:      volsyncbackend.New(c),
 		controllerNS: controllerNS,
 	}
@@ -104,8 +109,41 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 	} else if err != nil {
 		return nil, provisioner.ProvisioningFinished, fmt.Errorf("get underlying PVC: %w", err)
 	}
+	// 4. Propagate selected-node annotation if the scheduler has set it on the
+	// user PVC but it's missing from the underlying PVC.  This handles the race
+	// where the annotation arrives after the underlying PVC was already created.
+	// Re-read the user PVC from the API server (options.PVC may be stale from
+	// the informer cache).
+	const annSelectedNode = "volume.kubernetes.io/selected-node"
+	freshPVC := &corev1.PersistentVolumeClaim{}
+	if err := p.apiReader.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, freshPVC); err == nil {
+		selectedNode := freshPVC.Annotations[annSelectedNode]
+		klog.InfoS("selected-node check",
+			"userPVC", pvc.Name,
+			"selectedNode", selectedNode,
+			"underlyingAnnotations", underlyingPVC.Annotations)
+		if selectedNode != "" {
+			if underlyingPVC.Annotations == nil || underlyingPVC.Annotations[annSelectedNode] != selectedNode {
+				patch := client.MergeFrom(underlyingPVC.DeepCopy())
+				if underlyingPVC.Annotations == nil {
+					underlyingPVC.Annotations = map[string]string{}
+				}
+				underlyingPVC.Annotations[annSelectedNode] = selectedNode
+				if err := p.client.Patch(ctx, underlyingPVC, patch); err != nil {
+					klog.ErrorS(err, "failed to patch selected-node on underlying PVC")
+					return nil, provisioner.ProvisioningInBackground, fmt.Errorf("patch selected-node on underlying PVC: %w", err)
+				}
+				klog.InfoS("patched selected-node on underlying PVC",
+					"selectedNode", selectedNode,
+					"underlyingPVC", underlyingPVC.Name)
+			}
+		}
+	} else {
+		klog.ErrorS(err, "failed to read user PVC from API server",
+			"namespace", pvc.Namespace, "name", pvc.Name)
+	}
 
-	// 4. Wait for underlying PVC to bind.
+	// 5. Wait for underlying PVC to bind.
 	if underlyingPVC.Status.Phase != corev1.ClaimBound {
 		return nil, provisioner.ProvisioningInBackground, fmt.Errorf("waiting for underlying PVC %s/%s to bind", underlyingNS, underlyingName)
 	}
@@ -137,6 +175,7 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 		UserPVCName:         pvc.Name,
 		UserPVCNamespace:    pvc.Namespace,
 		ControllerNamespace: p.controllerNS,
+		NodeName:            nodeNameFromPV(underlyingPV),
 	}
 
 	// 7. Check S3 for existing backup.
@@ -219,7 +258,7 @@ func (p *OmnivolProvisioner) resolvePolicy(ctx context.Context, sc *storagev1.St
 	return policy, store, nil
 }
 
-// createUnderlyingPVC creates the real openebs-lvm PVC named <pvcname>-omnivol.
+// createUnderlyingPVC creates the real underlying PVC named <pvcname>-omnivol.
 func (p *OmnivolProvisioner) createUnderlyingPVC(
 	ctx context.Context,
 	pvc *corev1.PersistentVolumeClaim,
@@ -247,6 +286,14 @@ func (p *OmnivolProvisioner) createUnderlyingPVC(
 		},
 	}
 
+	// Propagate the selected-node annotation so that WaitForFirstConsumer
+	// StorageClasses bind the underlying PVC to the correct node.
+	if selectedNode := pvc.Annotations["volume.kubernetes.io/selected-node"]; selectedNode != "" {
+		underlying.Annotations = map[string]string{
+			"volume.kubernetes.io/selected-node": selectedNode,
+		}
+	}
+
 	if pvc.Spec.VolumeMode != nil {
 		underlying.Spec.VolumeMode = pvc.Spec.VolumeMode
 	}
@@ -264,7 +311,7 @@ func (p *OmnivolProvisioner) createUnderlyingPVC(
 }
 
 // buildPV constructs the PersistentVolume to return to the user's PVC.
-// nodeAffinity and volumeHandle are copied from the underlying openebs-lvm PV
+// nodeAffinity and volumeHandle are copied from the underlying PV
 // so that the pod can mount the volume directly (no extra indirection).
 func (p *OmnivolProvisioner) buildPV(
 	options provisioner.ProvisionOptions,
@@ -394,4 +441,22 @@ func reclaimPolicyOrDefault(p *corev1.PersistentVolumeReclaimPolicy) corev1.Pers
 		return corev1.PersistentVolumeReclaimDelete
 	}
 	return *p
+}
+
+// nodeNameFromPV extracts the node name from a PV's nodeAffinity.
+// It returns the first value from the first In-type match expression,
+// regardless of the topology key (works with openebs.io/nodename,
+// topology.topolvm.io/node, kubernetes.io/hostname, etc.).
+func nodeNameFromPV(pv *corev1.PersistentVolume) string {
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return ""
+	}
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		for _, expr := range term.MatchExpressions {
+			if expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) > 0 {
+				return expr.Values[0]
+			}
+		}
+	}
+	return ""
 }

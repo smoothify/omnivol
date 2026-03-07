@@ -158,7 +158,7 @@ func (r *BackupPolicyReconciler) countManagedPVCs(ctx context.Context, policyNam
 	}
 
 	// Count user PVCs using those StorageClasses (excludes the -omnivol underlying PVCs,
-	// which are on the real openebs-lvm StorageClass).
+	// which are on the real underlying StorageClass).
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcList); err != nil {
 		return 0, err

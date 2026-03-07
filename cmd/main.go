@@ -236,7 +236,7 @@ func main() {
 	// The provisioner uses the manager's client which is only ready after Start(),
 	// so we launch it in a goroutine gated on the cache being synced.
 	ctx := ctrl.SetupSignalHandler()
-	prov := provisioner.New(mgr.GetClient(), controllerNS)
+	prov := provisioner.New(mgr.GetClient(), mgr.GetAPIReader(), controllerNS)
 	kubeClient, err := kubeClientset(mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "Failed to create kubernetes clientset")

@@ -73,7 +73,7 @@ type EnsureParams struct {
 	// Store is the BackupStore referenced by the policy.
 	Store *omniv1alpha1.BackupStore
 
-	// UnderlyingPVC is the real openebs-lvm PVC (name: <pvcname>-omnivol).
+	// UnderlyingPVC is the real PVC managed by the underlying StorageClass (name: <pvcname>-omnivol).
 	UnderlyingPVC *corev1.PersistentVolumeClaim
 
 	// RepoPath is the computed restic repository path (may be overridden by annotation).
@@ -95,4 +95,8 @@ type EnsureParams struct {
 	// ControllerNamespace is the namespace where the omnivol controller runs.
 	// Credential secrets referenced by BackupStore are resolved in this namespace.
 	ControllerNamespace string
+
+	// NodeName is the node the underlying PV resides on.  Used to pin the
+	// VolSync mover pod (and its cache PVC) to the correct node.
+	NodeName string
 }

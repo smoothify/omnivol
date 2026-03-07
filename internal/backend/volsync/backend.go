@@ -27,6 +27,7 @@ import (
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -76,6 +77,14 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 		return fmt.Errorf("ensure restic secret: %w", err)
 	}
 
+	// Pre-create the cache PVC with the selected-node annotation so that it
+	// binds to the same node as the data volume.  Without this, a scheduler
+	// race can place the cache PVC on a different node when both use
+	// WaitForFirstConsumer local storage.
+	if err := b.ensureCachePVC(ctx, params); err != nil {
+		return fmt.Errorf("ensure cache PVC: %w", err)
+	}
+
 	copyMethod := volsyncv1alpha1.CopyMethodType(params.Policy.Spec.CopyMethod)
 	pvcName := params.UnderlyingPVC.Name
 	ns := params.UnderlyingPVC.Namespace
@@ -109,12 +118,65 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 			},
 			Restic: &volsyncv1alpha1.ReplicationSourceResticSpec{
 				ReplicationSourceVolumeOptions: volsyncv1alpha1.ReplicationSourceVolumeOptions{
-					CopyMethod: copyMethod,
+					CopyMethod:              copyMethod,
+					StorageClassName:        &params.Policy.Spec.StorageClassName,
+					VolumeSnapshotClassName: &params.Policy.Spec.StorageClassName,
+					AccessModes:             params.UnderlyingPVC.Spec.AccessModes,
 				},
-				Repository:        params.ResticSecretName,
-				Retain:            buildResticRetainPolicy(params),
-				PruneIntervalDays: ptr(int32(7)),
+				Repository:            params.ResticSecretName,
+				Retain:                buildResticRetainPolicy(params),
+				PruneIntervalDays:     ptr(int32(7)),
+				CacheStorageClassName: &params.Policy.Spec.StorageClassName,
+				CacheAccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				CacheCapacity:         ptr(resource.MustParse("1Gi")),
+				MoverConfig: volsyncv1alpha1.MoverConfig{
+					MoverAffinity: buildMoverNodeAffinity(params.NodeName),
+				},
 			},
+		}
+		return nil
+	})
+	return err
+}
+
+// ensureCachePVC pre-creates the VolSync restic cache PVC with the
+// volume.kubernetes.io/selected-node annotation set to the node that
+// hosts the data volume.  This prevents a scheduler race condition
+// where the cache PVC could bind to a different node when both the
+// cache and snapshot-clone use WaitForFirstConsumer local storage.
+func (b *Backend) ensureCachePVC(ctx context.Context, params backend.EnsureParams) error {
+	if params.NodeName == "" {
+		// No node name available — skip pre-creation and let VolSync handle it.
+		return nil
+	}
+
+	cacheName := "volsync-src-" + params.UnderlyingPVC.Name + "-cache"
+	ns := params.UnderlyingPVC.Namespace
+	cacheCapacity := resource.MustParse("1Gi")
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cacheName,
+			Namespace: ns,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, b.client, pvc, func() error {
+		// Only set fields on creation — don't overwrite if VolSync has
+		// already taken ownership and mutated the PVC.
+		if pvc.CreationTimestamp.IsZero() {
+			pvc.Annotations = map[string]string{
+				"volume.kubernetes.io/selected-node": params.NodeName,
+			}
+			pvc.Spec = corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &params.Policy.Spec.StorageClassName,
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: cacheCapacity,
+					},
+				},
+			}
 		}
 		return nil
 	})
@@ -403,4 +465,26 @@ func S3CheckBackupExists(ctx context.Context, params backend.EnsureParams, repoP
 	}
 
 	return c.CheckBackupExists(ctx, repoPath)
+}
+
+// buildMoverNodeAffinity returns a corev1.Affinity that pins the VolSync mover
+// pod to the given node.  This ensures the cache PVC (WaitForFirstConsumer) is
+// provisioned on the same node as the data volume.
+func buildMoverNodeAffinity(nodeName string) *corev1.Affinity {
+	if nodeName == "" {
+		return nil
+	}
+	return &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      "kubernetes.io/hostname",
+						Operator: corev1.NodeSelectorOpIn,
+						Values:   []string{nodeName},
+					}},
+				}},
+			},
+		},
+	}
 }
