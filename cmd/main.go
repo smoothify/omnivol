@@ -68,6 +68,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var defaultDeletePVCAfterBackup bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -86,6 +87,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&defaultDeletePVCAfterBackup, "default-delete-pvc-after-backup", true,
+		"Default for deleting PVCs after a successful final backup. "+
+			"Can be overridden per StorageClass, PVC, or Pod via annotation.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -215,7 +219,8 @@ func main() {
 	}
 
 	if err := (&controller.PodReconciler{
-		Client: mgr.GetClient(),
+		Client:                      mgr.GetClient(),
+		DefaultDeletePVCAfterBackup: defaultDeletePVCAfterBackup,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up Pod backup-protection controller")
 		os.Exit(1)

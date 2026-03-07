@@ -384,3 +384,162 @@ func TestOrphanReconciler_NotFoundHandledGracefully(t *testing.T) {
 		t.Fatalf("expected no error for not-found, got: %v", err)
 	}
 }
+
+// --- DeletePVCOnBackup tests ---
+
+const testSCName = "omnivol-sc"
+
+func TestDeletePVC_DefaultTrue_NoAnnotations(t *testing.T) {
+	ctx := context.Background()
+	scName := testSCName
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: scName},
+		Provisioner: "omnivol.smoothify.com/provisioner",
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(sc, pvc, pod).Build()
+
+	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: true}
+	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("expected true (controller default), got false")
+	}
+}
+
+func TestDeletePVC_DefaultFalse_NoAnnotations(t *testing.T) {
+	ctx := context.Background()
+	scName := testSCName
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: scName},
+		Provisioner: "omnivol.smoothify.com/provisioner",
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(sc, pvc, pod).Build()
+
+	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: false}
+	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false (controller default), got true")
+	}
+}
+
+func TestDeletePVC_StorageClassOverridesDefault(t *testing.T) {
+	ctx := context.Background()
+	scName := testSCName
+	// StorageClass sets annotation to "false", overriding default true
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        scName,
+			Annotations: map[string]string{annDeletePVCOnBackup: "false"},
+		},
+		Provisioner: "omnivol.smoothify.com/provisioner",
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(sc, pvc, pod).Build()
+
+	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: true}
+	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false (StorageClass override), got true")
+	}
+}
+
+func TestDeletePVC_StorageClassEnablesWhenDefaultFalse(t *testing.T) {
+	ctx := context.Background()
+	scName := testSCName
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        scName,
+			Annotations: map[string]string{annDeletePVCOnBackup: "true"},
+		},
+		Provisioner: "omnivol.smoothify.com/provisioner",
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(sc, pvc, pod).Build()
+
+	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: false}
+	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("expected true (StorageClass annotation), got false")
+	}
+}
+
+func TestDeletePVC_PodAnnotationTakesPriority(t *testing.T) {
+	ctx := context.Background()
+	scName := testSCName
+	// StorageClass says true, but Pod says false — Pod wins.
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        scName,
+			Annotations: map[string]string{annDeletePVCOnBackup: "true"},
+		},
+		Provisioner: "omnivol.smoothify.com/provisioner",
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "app-0",
+			Namespace:   "default",
+			Annotations: map[string]string{annDeletePVCOnBackup: "false"},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(sc, pvc, pod).Build()
+
+	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: true}
+	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false (Pod annotation overrides all), got true")
+	}
+}

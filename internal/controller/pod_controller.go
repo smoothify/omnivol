@@ -45,6 +45,11 @@ const (
 	// The most specific annotation wins: Pod > PVC > StorageClass.
 	annBackupOnDelete = "omnivol.smoothify.com/backup-on-delete"
 
+	// annDeletePVCOnBackup can be set on a Pod, PVC, or StorageClass to control
+	// whether the PVC should be deleted after a successful final backup.
+	// Values: "true" / "false". Hierarchy: Pod > PVC > StorageClass > controller default.
+	annDeletePVCOnBackup = "omnivol.smoothify.com/delete-pvc-after-backup"
+
 	// annValueTrue is the canonical "true" value for annotations.
 	annValueTrue = "true"
 
@@ -67,6 +72,10 @@ const (
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;update;patch
 type PodReconciler struct {
 	client.Client
+	// DefaultDeletePVCAfterBackup is the controller-wide default for deleting
+	// PVCs after a successful final backup. Can be overridden per StorageClass,
+	// PVC, or Pod via the omnivol.smoothify.com/delete-pvc-after-backup annotation.
+	DefaultDeletePVCAfterBackup bool
 }
 
 // SetupWithManager registers the PodReconciler with the manager.
@@ -181,12 +190,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	return ctrl.Result{}, nil
 }
 
-// isDeletePVCOnBackupEnabled checks the annotation hierarchy: Pod > PVC > StorageClass.
-// Default is false (opt-in only).
+// isDeletePVCOnBackupEnabled checks the annotation hierarchy: Pod > PVC > StorageClass > controller default.
 func (r *PodReconciler) isDeletePVCOnBackupEnabled(ctx context.Context, pod *corev1.Pod, pvcName string) (bool, error) {
-	annDeletePVCOnBackup := "omnivol.smoothify.com/delete-pvc-after-backup"
-
-	// Check Pod annotation first.
+	// Check Pod annotation first (highest priority).
 	if v, ok := pod.Annotations[annDeletePVCOnBackup]; ok {
 		return v == annValueTrue, nil
 	}
@@ -195,7 +201,7 @@ func (r *PodReconciler) isDeletePVCOnBackupEnabled(ctx context.Context, pod *cor
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: pod.Namespace}, pvc); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return r.DefaultDeletePVCAfterBackup, nil
 		}
 		return false, err
 	}
@@ -213,8 +219,8 @@ func (r *PodReconciler) isDeletePVCOnBackupEnabled(ctx context.Context, pod *cor
 		}
 	}
 
-	// Default: disabled.
-	return false, nil
+	// Fall back to controller-wide default.
+	return r.DefaultDeletePVCAfterBackup, nil
 }
 
 // omnivolPVCsForPod returns the names of PVCs used by the Pod whose StorageClass

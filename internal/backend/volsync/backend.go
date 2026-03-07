@@ -472,21 +472,46 @@ func S3CheckBackupExists(ctx context.Context, params backend.EnsureParams, repoP
 
 // buildMoverNodeAffinity returns a corev1.Affinity that pins the VolSync mover
 // pod to the given node.  This ensures the cache PVC (WaitForFirstConsumer) is
-// provisioned on the same node as the data volume.
+// provisioned on the same node as the data volume. It emits multiple terms to
+// support various CSI drivers (TopoLVM, OpenEBS, democratic-csi, standard).
 func buildMoverNodeAffinity(nodeName string) *corev1.Affinity {
 	if nodeName == "" {
 		return nil
 	}
+
 	return &corev1.Affinity{
 		NodeAffinity: &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-					MatchExpressions: []corev1.NodeSelectorRequirement{{
-						Key:      "kubernetes.io/hostname",
-						Operator: corev1.NodeSelectorOpIn,
-						Values:   []string{nodeName},
-					}},
-				}},
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "kubernetes.io/hostname",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{nodeName},
+						}},
+					},
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "topology.topolvm.io/node",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{nodeName},
+						}},
+					},
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "openebs.io/nodename",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{nodeName},
+						}},
+					},
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "democratic-csi.org/node",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{nodeName},
+						}},
+					},
+				},
 			},
 		},
 	}
