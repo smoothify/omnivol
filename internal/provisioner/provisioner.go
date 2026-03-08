@@ -55,6 +55,10 @@ const (
 	annScheduleOverride = "omnivol.smoothify.com/schedule"
 	annRepoPathOverride = "omnivol.smoothify.com/repository-path"
 
+	// Annotations for seeding from an existing backup
+	annSeedPath  = "omnivol.smoothify.com/seed-path"
+	annSeedStore = "omnivol.smoothify.com/seed-store"
+
 	// Label applied to all omnivol-managed resources.
 	labelManagedBy = "omnivol.smoothify.com/managed-by"
 
@@ -193,17 +197,62 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 		backupExists = false
 	}
 
-	// 8. Create ReplicationSource.
-	if err := p.backend.EnsureReplicationSource(ctx, params); err != nil {
-		return nil, provisioner.ProvisioningFinished, fmt.Errorf("ensure ReplicationSource: %w", err)
-	}
-
-	// 9. Restore if backup exists and restoreOnCreate is true.
+	// 8. Restore if backup exists or a seed is provided, before creating ReplicationSource.
 	if backupExists && policy.Spec.RestoreOnCreate {
 		_, err := p.backend.EnsureReplicationDestination(ctx, params)
 		if err != nil {
 			return nil, provisioner.ProvisioningFinished, fmt.Errorf("restore from backup: %w", err)
 		}
+	} else if !backupExists {
+		// No own backup. Check if a seed source is requested.
+		if seedPath := pvc.Annotations[annSeedPath]; seedPath != "" {
+			klog.InfoS("Restoring from seed source", "pvc", pvc.Name, "namespace", pvc.Namespace, "seedPath", seedPath)
+
+			// Resolve seed store: either from annotation or fallback to the policy's store.
+			seedStore := store
+			if storeName := pvc.Annotations[annSeedStore]; storeName != "" {
+				seedStore = &omniv1alpha1.BackupStore{}
+				if err := p.client.Get(ctx, types.NamespacedName{Name: storeName}, seedStore); err != nil {
+					return nil, provisioner.ProvisioningFinished, fmt.Errorf("get seed BackupStore %q: %w", storeName, err)
+				}
+			}
+
+			// Construct temporary parameters for the seed restore.
+			seedParams := params
+			seedParams.Store = seedStore
+			seedParams.RepoPath = seedPath
+			seedParams.ResticSecretName = params.ResticSecretName + "-seed"
+
+			// Ensure the cleanup of the temporary seed credential secret even if restore fails
+			defer func() {
+				seedSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      seedParams.ResticSecretName,
+						Namespace: seedParams.UnderlyingPVC.Namespace,
+					},
+				}
+				if err := p.client.Delete(ctx, seedSecret); err != nil && !apierrors.IsNotFound(err) {
+					klog.ErrorS(err, "failed to cleanup temporary seed restic secret", "secret", seedSecret.Name)
+				}
+			}()
+
+			seedExists, err := volsyncbackend.S3CheckBackupExists(ctx, seedParams, seedPath)
+			if err != nil {
+				klog.ErrorS(err, "failed to check S3 for seed backup", "seedPath", seedPath)
+			} else if seedExists {
+				_, err := p.backend.EnsureReplicationDestination(ctx, seedParams)
+				if err != nil {
+					return nil, provisioner.ProvisioningFinished, fmt.Errorf("restore from seed source: %w", err)
+				}
+			} else {
+				klog.InfoS("Seed backup not found in S3, skipping restore", "seedPath", seedPath)
+			}
+		}
+	}
+
+	// 9. Create ReplicationSource.
+	if err := p.backend.EnsureReplicationSource(ctx, params); err != nil {
+		return nil, provisioner.ProvisioningFinished, fmt.Errorf("ensure ReplicationSource: %w", err)
 	}
 
 	// 10. Build and return the PV, copying nodeAffinity + volumeHandle from the
