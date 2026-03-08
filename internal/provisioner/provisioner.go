@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	provisioner "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
@@ -105,64 +106,24 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 		return nil, provisioner.ProvisioningFinished, fmt.Errorf("StorageClass %q missing required parameter %q", sc.Name, paramUnderlyingStorageClass)
 	}
 
-	underlyingName := pvc.Name + underlyingSuffix
+	// 2. Ensure underlying PVC exists, is pinned to the correct node, and is bound.
 	underlyingNS := pvc.Namespace
-
-	// 2. Idempotency: check if underlying PVC already exists.
-	underlyingPVC := &corev1.PersistentVolumeClaim{}
-	err = p.client.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: underlyingNS}, underlyingPVC)
-	if apierrors.IsNotFound(err) {
-		// 3. Create underlying PVC.
-		underlyingPVC, err = p.createUnderlyingPVC(ctx, pvc, underlyingSC, underlyingName)
-		if err != nil {
-			return nil, provisioner.ProvisioningFinished, fmt.Errorf("create underlying PVC: %w", err)
-		}
-	} else if err != nil {
-		return nil, provisioner.ProvisioningFinished, fmt.Errorf("get underlying PVC: %w", err)
-	}
-	// 4. Propagate selected-node annotation if the scheduler has set it on the
-	// user PVC but it's missing from the underlying PVC.  This handles the race
-	// where the annotation arrives after the underlying PVC was already created.
-	// Re-read the user PVC from the API server (options.PVC may be stale from
-	// the informer cache).
-	const annSelectedNode = "volume.kubernetes.io/selected-node"
-	freshPVC := &corev1.PersistentVolumeClaim{}
-	if err := p.apiReader.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, freshPVC); err == nil {
-		selectedNode := freshPVC.Annotations[annSelectedNode]
-		klog.InfoS("selected-node check",
-			"userPVC", pvc.Name,
-			"selectedNode", selectedNode,
-			"underlyingAnnotations", underlyingPVC.Annotations)
-		if selectedNode != "" {
-			if underlyingPVC.Annotations == nil || underlyingPVC.Annotations[annSelectedNode] != selectedNode {
-				patch := client.MergeFrom(underlyingPVC.DeepCopy())
-				if underlyingPVC.Annotations == nil {
-					underlyingPVC.Annotations = map[string]string{}
-				}
-				underlyingPVC.Annotations[annSelectedNode] = selectedNode
-				if err := p.client.Patch(ctx, underlyingPVC, patch); err != nil {
-					klog.ErrorS(err, "failed to patch selected-node on underlying PVC")
-					return nil, provisioner.ProvisioningInBackground, fmt.Errorf("patch selected-node on underlying PVC: %w", err)
-				}
-				klog.InfoS("patched selected-node on underlying PVC",
-					"selectedNode", selectedNode,
-					"underlyingPVC", underlyingPVC.Name)
-			}
-		}
-	} else {
-		klog.ErrorS(err, "failed to read user PVC from API server",
-			"namespace", pvc.Namespace, "name", pvc.Name)
+	underlyingName := pvc.Name + underlyingSuffix
+	underlyingPVC, err := p.ensureUnderlyingPVCBound(ctx, pvc, underlyingSC, underlyingName)
+	if err != nil {
+		return nil, provisioner.ProvisioningFinished, fmt.Errorf("ensure underlying PVC: %w", err)
 	}
 
-	// 5. Wait for underlying PVC to bind.
-	if underlyingPVC.Status.Phase != corev1.ClaimBound {
-		return nil, provisioner.ProvisioningInBackground, fmt.Errorf("waiting for underlying PVC %s/%s to bind", underlyingNS, underlyingName)
-	}
-
-	// 5. Read underlying PV to copy nodeAffinity + volumeHandle.
+	// 3. Read underlying PV to copy nodeAffinity + volumeHandle.
 	underlyingPV := &corev1.PersistentVolume{}
-	if err := p.client.Get(ctx, types.NamespacedName{Name: underlyingPVC.Spec.VolumeName}, underlyingPV); err != nil {
-		return nil, provisioner.ProvisioningInBackground, fmt.Errorf("waiting for underlying PV %s: %w", underlyingPVC.Spec.VolumeName, err)
+	err = wait.PollUntilContextTimeout(ctx, 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
+		if err := p.apiReader.Get(ctx, types.NamespacedName{Name: underlyingPVC.Spec.VolumeName}, underlyingPV); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		return true, nil
+	})
+	if err != nil {
+		return nil, provisioner.ProvisioningFinished, fmt.Errorf("wait for underlying PV %s: %w", underlyingPVC.Spec.VolumeName, err)
 	}
 
 	// 6. Build the restic Secret name and effective repo path.
@@ -315,6 +276,69 @@ func (p *OmnivolProvisioner) resolvePolicy(ctx context.Context, sc *storagev1.St
 	return policy, store, nil
 }
 
+// ensureUnderlyingPVCBound gets or creates the underlying PVC, patches the selected-node annotation, and waits for it to bind.
+func (p *OmnivolProvisioner) ensureUnderlyingPVCBound(ctx context.Context, pvc *corev1.PersistentVolumeClaim, underlyingSC string, underlyingName string) (*corev1.PersistentVolumeClaim, error) {
+	underlyingNS := pvc.Namespace
+	underlyingPVC := &corev1.PersistentVolumeClaim{}
+
+	err := p.client.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: underlyingNS}, underlyingPVC)
+	if apierrors.IsNotFound(err) {
+		underlyingPVC, err = p.createUnderlyingPVC(ctx, pvc, underlyingSC, underlyingName)
+		if err != nil {
+			return nil, fmt.Errorf("create underlying PVC: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("get underlying PVC: %w", err)
+	}
+
+	// Propagate selected-node annotation if the scheduler has set it on the user PVC but it's missing from the underlying PVC.
+	const annSelectedNode = "volume.kubernetes.io/selected-node"
+	freshPVC := &corev1.PersistentVolumeClaim{}
+	if err := p.apiReader.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, freshPVC); err == nil {
+		selectedNode := freshPVC.Annotations[annSelectedNode]
+		klog.InfoS("selected-node check",
+			"userPVC", pvc.Name,
+			"selectedNode", selectedNode,
+			"underlyingAnnotations", underlyingPVC.Annotations)
+		if selectedNode != "" {
+			if underlyingPVC.Annotations == nil || underlyingPVC.Annotations[annSelectedNode] != selectedNode {
+				patch := client.MergeFrom(underlyingPVC.DeepCopy())
+				if underlyingPVC.Annotations == nil {
+					underlyingPVC.Annotations = map[string]string{}
+				}
+				underlyingPVC.Annotations[annSelectedNode] = selectedNode
+				if err := p.client.Patch(ctx, underlyingPVC, patch); err != nil {
+					klog.ErrorS(err, "failed to patch selected-node on underlying PVC")
+					return nil, fmt.Errorf("patch selected-node on underlying PVC: %w", err)
+				}
+				klog.InfoS("patched selected-node on underlying PVC",
+					"selectedNode", selectedNode,
+					"underlyingPVC", underlyingPVC.Name)
+			}
+		}
+	} else {
+		klog.ErrorS(err, "failed to read user PVC from API server", "namespace", pvc.Namespace, "name", pvc.Name)
+	}
+
+	// Wait for underlying PVC to bind.
+	err = wait.PollUntilContextTimeout(ctx, 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+		current := &corev1.PersistentVolumeClaim{}
+		if err := p.apiReader.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: underlyingNS}, current); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		if current.Status.Phase == corev1.ClaimBound {
+			underlyingPVC = current
+			return true, nil
+		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wait for underlying PVC %s/%s to bind: %w", underlyingNS, underlyingName, err)
+	}
+
+	return underlyingPVC, nil
+}
+
 // createUnderlyingPVC creates the real underlying PVC named <pvcname>-omnivol.
 func (p *OmnivolProvisioner) createUnderlyingPVC(
 	ctx context.Context,
@@ -359,9 +383,10 @@ func (p *OmnivolProvisioner) createUnderlyingPVC(
 		return nil, err
 	}
 
-	// Re-fetch to get the server-populated fields.
+	// Re-fetch to get the server-populated fields directly from apiserver
+	// to avoid a cache race where client.Get returns NotFound.
 	created := &corev1.PersistentVolumeClaim{}
-	if err := p.client.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: pvc.Namespace}, created); err != nil {
+	if err := p.apiReader.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: pvc.Namespace}, created); err != nil {
 		return nil, err
 	}
 	return created, nil
