@@ -151,6 +151,13 @@ func (p *OmnivolProvisioner) Provision(ctx context.Context, options provisioner.
 		NodeName:                   nodeNameFromPV(underlyingPV),
 	}
 
+	// Ensure the namespace is annotated for privileged movers if needed.
+	if policy.Spec.MoverSecurityContext != nil {
+		if err := p.ensurePrivilegedMoversAnnotation(ctx, pvc.Namespace); err != nil {
+			return nil, provisioner.ProvisioningFinished, fmt.Errorf("ensure privileged-movers annotation: %w", err)
+		}
+	}
+
 	// 7. Check S3 for existing backup.
 	backupExists, err := volsyncbackend.S3CheckBackupExists(ctx, params, repoPath)
 	if err != nil {
@@ -274,6 +281,35 @@ func (p *OmnivolProvisioner) resolvePolicy(ctx context.Context, sc *storagev1.St
 	}
 
 	return policy, store, nil
+}
+
+// ensurePrivilegedMoversAnnotation ensures the namespace has the
+// volsync.backube/privileged-movers annotation set to "true".  This is required
+// when the BackupPolicy specifies a custom MoverSecurityContext (e.g. runAsUser: 0)
+// so that VolSync allows the mover pod to run with the requested context.
+func (p *OmnivolProvisioner) ensurePrivilegedMoversAnnotation(ctx context.Context, namespace string) error {
+	const annPrivilegedMovers = "volsync.backube/privileged-movers"
+
+	ns := &corev1.Namespace{}
+	if err := p.client.Get(ctx, types.NamespacedName{Name: namespace}, ns); err != nil {
+		return fmt.Errorf("get namespace %q: %w", namespace, err)
+	}
+
+	if ns.Annotations != nil && ns.Annotations[annPrivilegedMovers] == "true" {
+		return nil // already set
+	}
+
+	patch := client.MergeFrom(ns.DeepCopy())
+	if ns.Annotations == nil {
+		ns.Annotations = map[string]string{}
+	}
+	ns.Annotations[annPrivilegedMovers] = "true"
+	if err := p.client.Patch(ctx, ns, patch); err != nil {
+		return fmt.Errorf("patch namespace %q: %w", namespace, err)
+	}
+
+	klog.InfoS("Annotated namespace for privileged movers", "namespace", namespace)
+	return nil
 }
 
 // ensureUnderlyingPVCBound gets or creates the underlying PVC, patches the selected-node annotation, and waits for it to bind.

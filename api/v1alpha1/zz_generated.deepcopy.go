@@ -21,6 +21,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -92,6 +93,11 @@ func (in *BackupPolicySpec) DeepCopyInto(out *BackupPolicySpec) {
 		in, out := &in.DeleteTimeout, &out.DeleteTimeout
 		*out = new(v1.Duration)
 		**out = **in
+	}
+	if in.MoverSecurityContext != nil {
+		in, out := &in.MoverSecurityContext, &out.MoverSecurityContext
+		*out = new(corev1.PodSecurityContext)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

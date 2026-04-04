@@ -134,6 +134,7 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 					MoverPodLabels: map[string]string{
 						"omnivol.smoothify.com/mover": "true",
 					},
+					MoverSecurityContext: params.Policy.Spec.MoverSecurityContext,
 				},
 			},
 		}
@@ -257,6 +258,9 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 					DestinationPVC:   &pvcName,
 				},
 				Repository: params.ResticSecretName,
+				MoverConfig: volsyncv1alpha1.MoverConfig{
+					MoverSecurityContext: params.Policy.Spec.MoverSecurityContext,
+				},
 			},
 		}
 		return nil

@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -66,6 +67,23 @@ type BackupPolicySpec struct {
 	// If empty the path defaults to "/<pvcNamespace>/<pvcName>".
 	// +optional
 	RepositoryPath string `json:"repositoryPath,omitempty"`
+
+	// moverSecurityContext overrides the PodSecurityContext applied to the
+	// VolSync restic mover pod.  When omitted, VolSync uses its own defaults.
+	//
+	// The primary use-case is a shared NFS-backed volume whose subdirectories
+	// are owned by a variety of UIDs (e.g. WordPress www-data/UID 33).  Running
+	// the mover as root allows it to read and restore all files regardless of
+	// owning UID:
+	//
+	//   moverSecurityContext:
+	//     runAsUser: 0
+	//
+	// Note: container-level capabilities like DAC_READ_SEARCH require the
+	// VolSync privileged-movers namespace annotation instead
+	// (volsync.backube/privileged-movers: "true").
+	// +optional
+	MoverSecurityContext *corev1.PodSecurityContext `json:"moverSecurityContext,omitempty"`
 }
 
 // RetainPolicy defines how many periodic backup snapshots to keep.
