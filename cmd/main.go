@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -71,6 +72,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var defaultDeletePVCAfterBackup bool
+	var defaultFinalSyncTimeout time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -92,6 +94,8 @@ func main() {
 	flag.BoolVar(&defaultDeletePVCAfterBackup, "default-delete-pvc-after-backup", true,
 		"Default for deleting PVCs after a successful final backup. "+
 			"Can be overridden per StorageClass, PVC, or Pod via annotation.")
+	flag.DurationVar(&defaultFinalSyncTimeout, "default-final-sync-timeout", 15*time.Minute,
+		"Default timeout for the final backup sync when deleting a protected pod.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -223,6 +227,7 @@ func main() {
 	if err := (&controller.PodReconciler{
 		Client:                      mgr.GetClient(),
 		DefaultDeletePVCAfterBackup: defaultDeletePVCAfterBackup,
+		FinalSyncTimeout:            defaultFinalSyncTimeout,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up Pod backup-protection controller")
 		os.Exit(1)

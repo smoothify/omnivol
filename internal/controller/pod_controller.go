@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,6 +77,9 @@ type PodReconciler struct {
 	// PVCs after a successful final backup. Can be overridden per StorageClass,
 	// PVC, or Pod via the omnivol.smoothify.com/delete-pvc-after-backup annotation.
 	DefaultDeletePVCAfterBackup bool
+	// FinalSyncTimeout defines the maximum duration to wait for a final sync to complete
+	// before bypassing the backup protection to prevent deadlocks.
+	FinalSyncTimeout time.Duration
 }
 
 // SetupWithManager registers the PodReconciler with the manager.
@@ -115,6 +119,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			if controllerutil.AddFinalizer(pod, finalizerBackupProtection) {
 				logger.Info("Adding backup-protection finalizer", "pod", pod.Name)
 				if err := r.Update(ctx, pod); err != nil {
+					if apierrors.IsConflict(err) {
+						return ctrl.Result{Requeue: true}, nil
+					}
 					return ctrl.Result{}, err
 				}
 			}
@@ -123,6 +130,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			if controllerutil.RemoveFinalizer(pod, finalizerBackupProtection) {
 				logger.Info("Removing backup-protection finalizer (opt-out)", "pod", pod.Name)
 				if err := r.Update(ctx, pod); err != nil {
+					if apierrors.IsConflict(err) {
+						return ctrl.Result{Requeue: true}, nil
+					}
 					return ctrl.Result{}, err
 				}
 			}
@@ -198,6 +208,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	logger.Info("Final sync complete — removing backup-protection finalizer", "pod", pod.Name)
 	controllerutil.RemoveFinalizer(pod, finalizerBackupProtection)
 	if err := r.Update(ctx, pod); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -320,6 +333,16 @@ func (r *PodReconciler) ensureFinalSync(ctx context.Context, rsName, namespace s
 		return false, err
 	}
 
+	// Verify that the underlying PVC actually exists. If it has been deleted,
+	// VolSync can never back it up, so we should skip waiting to avoid deadlocks.
+	underlyingPVC := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: rsName, Namespace: namespace}, underlyingPVC); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+
 	triggerPrefix := "final-sync-"
 
 	// Check if we already triggered a final sync.
@@ -328,6 +351,16 @@ func (r *PodReconciler) ensureFinalSync(ctx context.Context, rsName, namespace s
 		if rs.Status.LastManualSync == rs.Spec.Trigger.Manual {
 			return true, nil
 		}
+
+		// Detect deadlocks/timeouts by parsing the trigger timestamp.
+		timeStr := strings.TrimPrefix(rs.Spec.Trigger.Manual, triggerPrefix)
+		if triggerUnix, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
+			triggeredAt := time.Unix(triggerUnix, 0)
+			if time.Since(triggeredAt) > r.FinalSyncTimeout {
+				return true, nil
+			}
+		}
+
 		// Still in progress.
 		return false, nil
 	}
