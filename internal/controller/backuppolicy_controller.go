@@ -46,7 +46,7 @@ const (
 // +kubebuilder:rbac:groups=omnivol.smoothify.com,resources=backuppolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;patch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;patch
 type BackupPolicyReconciler struct {
 	client.Client
 }
