@@ -68,3 +68,24 @@ func (c *Client) CheckBackupExists(ctx context.Context, repoPath string) (bool, 
 	}
 	return true, nil
 }
+
+// GetBackupSize returns the total size in bytes of all objects stored under
+// repoPath in the bucket.  It lists objects recursively, so the result
+// represents the full on-disk footprint of the restic repository.
+func (c *Client) GetBackupSize(ctx context.Context, repoPath string) (int64, error) {
+	prefix := repoPath + "/"
+
+	opts := minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	}
+
+	var totalBytes int64
+	for obj := range c.minioClient.ListObjects(ctx, c.bucket, opts) {
+		if obj.Err != nil {
+			return 0, fmt.Errorf("list objects under %q: %w", prefix, obj.Err)
+		}
+		totalBytes += obj.Size
+	}
+	return totalBytes, nil
+}

@@ -43,6 +43,7 @@ import (
 	omnivolv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
 	"github.com/smoothify/omnivol/internal/controller"
 	"github.com/smoothify/omnivol/internal/drain"
+	_ "github.com/smoothify/omnivol/internal/metrics" // registers Prometheus gauges
 	"github.com/smoothify/omnivol/internal/provisioner"
 	// +kubebuilder:scaffold:imports
 )
@@ -231,6 +232,14 @@ func main() {
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up Mover toleration controller")
+		os.Exit(1)
+	}
+
+	if err := (&controller.MetricsReconciler{
+		Client:    mgr.GetClient(),
+		Namespace: controllerNS,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up Metrics controller")
 		os.Exit(1)
 	}
 

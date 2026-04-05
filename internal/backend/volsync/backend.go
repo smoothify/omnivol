@@ -36,6 +36,8 @@ import (
 
 	"github.com/smoothify/omnivol/internal/backend"
 	"github.com/smoothify/omnivol/internal/s3check"
+
+	omniv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
 )
 
 const (
@@ -542,4 +544,31 @@ func buildMoverNodeAffinity(nodeName string) *corev1.Affinity {
 			},
 		},
 	}
+}
+
+// S3CheckBackupSize returns the total size in bytes of all objects stored in the
+// restic repository at repoPath.  It uses the BackupStore's S3 credentials.
+func S3CheckBackupSize(ctx context.Context, cl client.Client, store *omniv1alpha1.BackupStore, controllerNS, repoPath string) (int64, error) {
+	s3 := store.Spec.S3
+
+	credSecret := &corev1.Secret{}
+	if err := cl.Get(ctx, types.NamespacedName{
+		Name:      s3.CredentialsSecret,
+		Namespace: controllerNS,
+	}, credSecret); err != nil {
+		return 0, fmt.Errorf("get credentials secret: %w", err)
+	}
+
+	c, err := s3check.NewClient(
+		s3.Endpoint,
+		s3.Bucket,
+		string(credSecret.Data["access-key-id"]),
+		string(credSecret.Data["secret-access-key"]),
+		s3.TLS,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("create s3 client: %w", err)
+	}
+
+	return c.GetBackupSize(ctx, repoPath)
 }
