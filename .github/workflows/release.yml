@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
 
     steps:
       - name: Checkout
@@ -64,3 +66,42 @@ jobs:
           name: ${{ steps.tag.outputs.new_tag }}
           body: ${{ steps.tag.outputs.changelog }}
           generate_release_notes: false
+
+  publish-chart:
+    name: Publish Helm chart
+    runs-on: ubuntu-latest
+    needs: release
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_REF_NAME: ${{ needs.release.outputs.new_tag }}
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Update chart version and appVersion
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" charts/omnivol/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.version }}\"/" charts/omnivol/Chart.yaml
+
+      - name: Update default image tag in values.yaml
+        run: |
+          sed -i "s|tag:.*|tag: \"${{ steps.version.outputs.version }}\"|" charts/omnivol/values.yaml
+
+      - name: Copy latest CRDs into chart
+        run: cp config/crd/bases/*.yaml charts/omnivol/crds/
+
+      - name: Package and push chart
+        run: |
+          helm package charts/omnivol --destination .cr-release-packages
+          helm push .cr-release-packages/omnivol-${{ steps.version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
