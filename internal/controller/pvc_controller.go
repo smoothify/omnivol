@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"time"
 
@@ -124,31 +125,14 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		r.Backend = volsyncbackend.New(r.Client)
 	}
 
-	controllerNS := r.ControllerNamespace
-	if controllerNS == "" {
-		controllerNS = os.Getenv("POD_NAMESPACE")
-		if controllerNS == "" {
-			controllerNS = "omnivol-system"
-		}
-	}
-
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, req.NamespacedName, pvc); err != nil {
-		if apierrors.IsNotFound(err) {
-			// PVC deleted — cleanup handled by orphan controller.
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Only process PVCs with the backup-policy label.
 	policyName := pvc.Labels[labelBackupPolicy]
-	if policyName == "" {
-		return ctrl.Result{}, nil
-	}
-
-	// Skip PVCs being deleted.
-	if pvc.DeletionTimestamp != nil {
+	if policyName == "" || pvc.DeletionTimestamp != nil {
 		return ctrl.Result{}, nil
 	}
 
@@ -157,155 +141,38 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Resolve BackupPolicy and BackupStore.
-	policy := &omniv1alpha1.BackupPolicy{}
-	if err := r.Get(ctx, types.NamespacedName{Name: policyName}, policy); err != nil {
-		logger.Error(err, "Could not resolve BackupPolicy", "policy", policyName, "pvc", pvc.Name)
-		return ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
+	// Resolve backup context (policy, store, params).
+	bctx, result, err := r.resolveBackupContext(ctx, pvc, policyName)
+	if bctx == nil {
+		return result, err
 	}
 
-	store := &omniv1alpha1.BackupStore{}
-	if err := r.Get(ctx, types.NamespacedName{Name: policy.Spec.BackupStore}, store); err != nil {
-		logger.Error(err, "Could not resolve BackupStore", "store", policy.Spec.BackupStore, "pvc", pvc.Name)
-		return ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
+	// Handle restore-on-create for new PVCs with existing S3 backups.
+	if err := r.handleRestore(ctx, pvc, bctx.params); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Check if the BackupStore is Ready.
-	storeReady := false
-	for _, c := range store.Status.Conditions {
-		if c.Type == conditionReady && c.Status == metav1.ConditionTrue {
-			storeReady = true
-			break
-		}
-	}
-	if !storeReady {
-		logger.Info("BackupStore not ready, skipping", "store", store.Name, "pvc", pvc.Name)
-		return ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
-	}
-
-	// Compute parameters.
-	repoPath := computeRepoPath(pvc, policy)
-	schedule, err := stagger.ApplyStagger(effectiveSchedule(pvc, policy), pvc.UID)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("compute staggered schedule: %w", err)
-	}
-
-	// Resolve node name from PV.
-	nodeName := r.nodeNameFromPVC(ctx, pvc)
-
-	params := backend.EnsureParams{
-		Client:              r.Client,
-		Policy:              policy,
-		Store:               store,
-		PVC:                 pvc,
-		RepoPath:            repoPath,
-		Schedule:            schedule,
-		ResticSecretName:    "omnivol-" + pvc.Name,
-		ControllerNamespace: controllerNS,
-		NodeName:            nodeName,
-	}
-
-	// Ensure the namespace is annotated for privileged movers if needed.
-	if policy.Spec.MoverSecurityContext != nil {
-		if err := r.ensurePrivilegedMoversAnnotation(ctx, pvc.Namespace); err != nil {
-			return ctrl.Result{}, fmt.Errorf("ensure privileged-movers annotation: %w", err)
-		}
-	}
-
-	// Check if this is a new PVC that might need restoration.
-	// A PVC needs restore if:
-	// 1. No ReplicationSource exists yet (first reconcile after PVC creation)
-	// 2. A backup exists in S3
-	rs := &volsyncv1alpha1.ReplicationSource{}
-	rsExists := true
-	if err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, rs); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-		rsExists = false
-	}
-
-	if !rsExists {
-		// Check S3 for existing backup.
-		backupExists, err := volsyncbackend.S3CheckBackupExists(ctx, params, repoPath)
-		if err != nil {
-			// Non-fatal: treat as no backup so we proceed without restore.
-			logger.Error(err, "Could not check S3 for existing backup", "pvc", pvc.Name)
-			backupExists = false
-		}
-
-		if backupExists {
-			logger.Info("Restoring from existing backup", "pvc", pvc.Name, "repoPath", repoPath)
-
-			// Mark PVC as restore-in-progress.
-			if pvc.Annotations == nil || pvc.Annotations[annRestoreInProgress] != "true" {
-				patch := client.MergeFrom(pvc.DeepCopy())
-				if pvc.Annotations == nil {
-					pvc.Annotations = map[string]string{}
-				}
-				pvc.Annotations[annRestoreInProgress] = "true"
-				if err := r.Patch(ctx, pvc, patch); err != nil {
-					return ctrl.Result{}, fmt.Errorf("annotate PVC restore-in-progress: %w", err)
-				}
-			}
-
-			_, err := r.Backend.EnsureReplicationDestination(ctx, params)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("restore from backup: %w", err)
-			}
-
-			// Clear restore-in-progress annotation.
-			patch := client.MergeFrom(pvc.DeepCopy())
-			delete(pvc.Annotations, annRestoreInProgress)
-			if err := r.Patch(ctx, pvc, patch); err != nil {
-				return ctrl.Result{}, fmt.Errorf("remove restore-in-progress annotation: %w", err)
-			}
-
-			logger.Info("Restore complete", "pvc", pvc.Name)
-		}
-	}
-
-	// --- Auto-migration check ---
-	// If the PVC's PV is on a cordoned node and auto-migrate is enabled,
-	// initiate migration: final sync → delete PVC → recreate → restore.
-	if r.isAutoMigrateEnabled(pvc, policy) && nodeName != "" {
-		nodeObj := &corev1.Node{}
-		if err := r.Get(ctx, types.NamespacedName{Name: nodeName}, nodeObj); err == nil {
-			if nodeObj.Spec.Unschedulable && pvc.Annotations[annMigrating] != "true" {
-				logger.Info("PVC on cordoned node — initiating migration",
-					"pvc", pvc.Name, "node", nodeName)
-
-				result, err := r.handleMigration(ctx, pvc, params, nodeName)
-				if err != nil {
-					logger.Error(err, "Migration failed", "pvc", pvc.Name)
-				}
-				return result, err
-			}
+	// Auto-migration: move PVC off cordoned nodes.
+	if r.isAutoMigrateEnabled(pvc, bctx.policy) && bctx.nodeName != "" {
+		if result, err, handled := r.checkMigration(ctx, pvc, bctx.params, bctx.nodeName); handled {
+			return result, err
 		}
 	}
 
 	// Ensure ReplicationSource exists for ongoing backups.
-	if err := r.Backend.EnsureReplicationSource(ctx, params); err != nil {
+	if err := r.Backend.EnsureReplicationSource(ctx, bctx.params); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure ReplicationSource: %w", err)
 	}
 
 	// Manage scheduling gates for pods referencing this PVC.
-	if pvc.Annotations[annRestoreInProgress] == "true" {
-		if err := r.addSchedulingGates(ctx, pvc); err != nil {
-			logger.Error(err, "Could not add scheduling gates", "pvc", pvc.Name)
-		}
-	} else {
-		if err := r.removeSchedulingGates(ctx, pvc); err != nil {
-			logger.Error(err, "Could not remove scheduling gates", "pvc", pvc.Name)
-		}
-	}
+	r.syncSchedulingGates(ctx, pvc)
 
 	// Update BackupPolicy status.
 	if err := r.updatePolicyStatus(ctx, policyName); err != nil {
 		logger.Error(err, "Could not update BackupPolicy status", "policy", policyName)
 	}
 
-	logger.Info("Reconciled PVC backup", "pvc", pvc.Name, "policy", policyName, "schedule", schedule)
+	logger.Info("Reconciled PVC backup", "pvc", pvc.Name, "policy", policyName, "schedule", bctx.params.Schedule)
 	return ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
 }
 
@@ -340,15 +207,179 @@ func nodeNameFromPV(pv *corev1.PersistentVolume) string {
 	return ""
 }
 
+// backupContext holds resolved policy, store, params, and node name.
+type backupContext struct {
+	policy   *omniv1alpha1.BackupPolicy
+	params   backend.EnsureParams
+	nodeName string
+}
+
+// resolveBackupContext resolves the BackupPolicy, BackupStore, and builds
+// EnsureParams.  Returns nil bctx if the PVC cannot be processed yet.
+func (r *PVCReconciler) resolveBackupContext(
+	ctx context.Context,
+	pvc *corev1.PersistentVolumeClaim,
+	policyName string,
+) (*backupContext, ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	controllerNS := r.ControllerNamespace
+	if controllerNS == "" {
+		controllerNS = os.Getenv("POD_NAMESPACE")
+		if controllerNS == "" {
+			controllerNS = "omnivol-system"
+		}
+	}
+
+	policy := &omniv1alpha1.BackupPolicy{}
+	if err := r.Get(ctx, types.NamespacedName{Name: policyName}, policy); err != nil {
+		logger.Error(err, "Could not resolve BackupPolicy", "policy", policyName, "pvc", pvc.Name)
+		return nil, ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
+	}
+
+	store := &omniv1alpha1.BackupStore{}
+	if err := r.Get(ctx, types.NamespacedName{Name: policy.Spec.BackupStore}, store); err != nil {
+		logger.Error(err, "Could not resolve BackupStore", "store", policy.Spec.BackupStore, "pvc", pvc.Name)
+		return nil, ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
+	}
+
+	if !meta.IsStatusConditionTrue(store.Status.Conditions, conditionReady) {
+		logger.Info("BackupStore not ready, skipping", "store", store.Name, "pvc", pvc.Name)
+		return nil, ctrl.Result{RequeueAfter: pvcResyncPeriod}, nil
+	}
+
+	repoPath := computeRepoPath(pvc, policy)
+	schedule, err := stagger.ApplyStagger(effectiveSchedule(pvc, policy), pvc.UID)
+	if err != nil {
+		return nil, ctrl.Result{}, fmt.Errorf("compute staggered schedule: %w", err)
+	}
+
+	nodeName := r.nodeNameFromPVC(ctx, pvc)
+
+	params := backend.EnsureParams{
+		Client:              r.Client,
+		Policy:              policy,
+		Store:               store,
+		PVC:                 pvc,
+		RepoPath:            repoPath,
+		Schedule:            schedule,
+		ResticSecretName:    "omnivol-" + pvc.Name,
+		ControllerNamespace: controllerNS,
+		NodeName:            nodeName,
+	}
+
+	// Ensure the namespace is annotated for privileged movers if needed.
+	if policy.Spec.MoverSecurityContext != nil {
+		if err := r.ensurePrivilegedMoversAnnotation(ctx, pvc.Namespace); err != nil {
+			return nil, ctrl.Result{}, fmt.Errorf("ensure privileged-movers annotation: %w", err)
+		}
+	}
+
+	return &backupContext{policy: policy, params: params, nodeName: nodeName}, ctrl.Result{}, nil
+}
+
+// handleRestore checks if a new PVC needs restoration from an existing S3
+// backup and performs the restore if needed.
+func (r *PVCReconciler) handleRestore(ctx context.Context, pvc *corev1.PersistentVolumeClaim, params backend.EnsureParams) error {
+	logger := log.FromContext(ctx)
+
+	// Only restore if no ReplicationSource exists yet (first reconcile).
+	rs := &volsyncv1alpha1.ReplicationSource{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, rs); err == nil {
+		return nil // RS exists, not a new PVC
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	backupExists, err := volsyncbackend.S3CheckBackupExists(ctx, params, params.RepoPath)
+	if err != nil {
+		logger.Error(err, "Could not check S3 for existing backup", "pvc", pvc.Name)
+		return nil // non-fatal
+	}
+	if !backupExists {
+		return nil
+	}
+
+	logger.Info("Restoring from existing backup", "pvc", pvc.Name, "repoPath", params.RepoPath)
+
+	// Mark PVC as restore-in-progress.
+	if pvc.Annotations == nil || pvc.Annotations[annRestoreInProgress] != annValueTrue {
+		patch := client.MergeFrom(pvc.DeepCopy())
+		if pvc.Annotations == nil {
+			pvc.Annotations = map[string]string{}
+		}
+		pvc.Annotations[annRestoreInProgress] = annValueTrue
+		if err := r.Patch(ctx, pvc, patch); err != nil {
+			return fmt.Errorf("annotate PVC restore-in-progress: %w", err)
+		}
+	}
+
+	if _, err := r.Backend.EnsureReplicationDestination(ctx, params); err != nil {
+		return fmt.Errorf("restore from backup: %w", err)
+	}
+
+	// Clear restore-in-progress annotation.
+	patch := client.MergeFrom(pvc.DeepCopy())
+	delete(pvc.Annotations, annRestoreInProgress)
+	if err := r.Patch(ctx, pvc, patch); err != nil {
+		return fmt.Errorf("remove restore-in-progress annotation: %w", err)
+	}
+
+	logger.Info("Restore complete", "pvc", pvc.Name)
+	return nil
+}
+
+// checkMigration checks if the PVC's node is cordoned and initiates migration
+// if so.  Returns (result, err, handled) — if handled is true the caller should
+// return immediately.
+func (r *PVCReconciler) checkMigration(
+	ctx context.Context,
+	pvc *corev1.PersistentVolumeClaim,
+	params backend.EnsureParams,
+	nodeName string,
+) (ctrl.Result, error, bool) {
+	logger := log.FromContext(ctx)
+
+	nodeObj := &corev1.Node{}
+	if err := r.Get(ctx, types.NamespacedName{Name: nodeName}, nodeObj); err != nil {
+		return ctrl.Result{}, nil, false
+	}
+	if !nodeObj.Spec.Unschedulable || pvc.Annotations[annMigrating] == annValueTrue {
+		return ctrl.Result{}, nil, false
+	}
+
+	logger.Info("PVC on cordoned node — initiating migration", "pvc", pvc.Name, "node", nodeName)
+	result, err := r.handleMigration(ctx, pvc, params, nodeName)
+	if err != nil {
+		logger.Error(err, "Migration failed", "pvc", pvc.Name)
+	}
+	return result, err, true
+}
+
+// syncSchedulingGates adds or removes scheduling gates from pods
+// referencing this PVC based on restore state.
+func (r *PVCReconciler) syncSchedulingGates(ctx context.Context, pvc *corev1.PersistentVolumeClaim) {
+	logger := log.FromContext(ctx)
+	if pvc.Annotations[annRestoreInProgress] == annValueTrue {
+		if err := r.addSchedulingGates(ctx, pvc); err != nil {
+			logger.Error(err, "Could not add scheduling gates", "pvc", pvc.Name)
+		}
+	} else {
+		if err := r.removeSchedulingGates(ctx, pvc); err != nil {
+			logger.Error(err, "Could not remove scheduling gates", "pvc", pvc.Name)
+		}
+	}
+}
+
 // ensurePrivilegedMoversAnnotation ensures the namespace has the
-// volsync.backube/privileged-movers annotation set to "true".
+// volsync.backube/privileged-movers annotation set.
 func (r *PVCReconciler) ensurePrivilegedMoversAnnotation(ctx context.Context, namespace string) error {
 	ns := &corev1.Namespace{}
 	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, ns); err != nil {
 		return fmt.Errorf("get namespace %q: %w", namespace, err)
 	}
 
-	if ns.Annotations != nil && ns.Annotations[pvcAnnPrivilegedMovers] == "true" {
+	if ns.Annotations != nil && ns.Annotations[pvcAnnPrivilegedMovers] == annValueTrue {
 		return nil // already set
 	}
 
@@ -356,7 +387,7 @@ func (r *PVCReconciler) ensurePrivilegedMoversAnnotation(ctx context.Context, na
 	if ns.Annotations == nil {
 		ns.Annotations = map[string]string{}
 	}
-	ns.Annotations[pvcAnnPrivilegedMovers] = "true"
+	ns.Annotations[pvcAnnPrivilegedMovers] = annValueTrue
 	if err := r.Patch(ctx, ns, patch); err != nil {
 		return fmt.Errorf("patch namespace %q: %w", namespace, err)
 	}
@@ -462,7 +493,7 @@ func (r *PVCReconciler) mapNodeToPVCs(ctx context.Context, obj client.Object) []
 // Per-PVC annotation overrides the BackupPolicy spec.
 func (r *PVCReconciler) isAutoMigrateEnabled(pvc *corev1.PersistentVolumeClaim, policy *omniv1alpha1.BackupPolicy) bool {
 	if v, ok := pvc.Annotations[annAutoMigrate]; ok {
-		return v == "true"
+		return v == annValueTrue
 	}
 	return policy.Spec.AutoMigrate
 }
@@ -541,21 +572,14 @@ func (r *PVCReconciler) handleMigration(ctx context.Context, pvc *corev1.Persist
 func savePVCSpec(pvc *corev1.PersistentVolumeClaim) *corev1.PersistentVolumeClaim {
 	// Deep copy labels and annotations.
 	labels := make(map[string]string, len(pvc.Labels))
-	for k, v := range pvc.Labels {
-		labels[k] = v
-	}
-	annotations := make(map[string]string)
-	for k, v := range pvc.Annotations {
-		// Skip transient annotations.
-		if k == annRestoreInProgress || k == annMigrating {
-			continue
-		}
-		// Skip the selected-node annotation — let the scheduler pick.
-		if k == "volume.kubernetes.io/selected-node" {
-			continue
-		}
-		annotations[k] = v
-	}
+	maps.Copy(labels, pvc.Labels)
+
+	annotations := make(map[string]string, len(pvc.Annotations))
+	maps.Copy(annotations, pvc.Annotations)
+	// Remove transient annotations.
+	delete(annotations, annRestoreInProgress)
+	delete(annotations, annMigrating)
+	delete(annotations, "volume.kubernetes.io/selected-node")
 
 	newPVC := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{

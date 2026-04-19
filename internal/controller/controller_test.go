@@ -42,6 +42,8 @@ func newScheme() *runtime.Scheme {
 	return s
 }
 
+const testSCName = "topolvm-thin"
+
 // --- BackupStore controller ---
 
 func TestBackupStoreReconciler_CredentialsNotFound(t *testing.T) {
@@ -204,7 +206,7 @@ func TestPVCReconciler_SkipUnboundPVC(t *testing.T) {
 
 func TestPVCReconciler_EnsuresRS(t *testing.T) {
 	ctx := context.Background()
-	scName := "topolvm-thin"
+	scName := testSCName
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -526,18 +528,18 @@ func TestIsAutoMigrateEnabled_PVCOverrideTrue(t *testing.T) {
 // --- savePVCSpec tests ---
 
 func TestSavePVCSpec_StripsBindingFields(t *testing.T) {
-	scName := "topolvm-thin"
+	scName := testSCName
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "data",
 			Namespace: "prod",
 			Labels:    map[string]string{labelBackupPolicy: "hourly", "app": "myapp"},
 			Annotations: map[string]string{
-				annScheduleOverride:                      "30 2 * * *",
-				annRestoreInProgress:                     "true",
-				annMigrating:                             "true",
-				"volume.kubernetes.io/selected-node":     "worker-1",
-				"pv.kubernetes.io/bind-completed":        "yes",
+				annScheduleOverride:                  "30 2 * * *",
+				annRestoreInProgress:                 "true",
+				annMigrating:                         "true",
+				"volume.kubernetes.io/selected-node": "worker-1",
+				"pv.kubernetes.io/bind-completed":    "yes",
 			},
 			UID:             "old-uid",
 			ResourceVersion: "12345",
@@ -592,7 +594,7 @@ func TestSavePVCSpec_StripsBindingFields(t *testing.T) {
 	}
 
 	// Should preserve storage class and resources.
-	if saved.Spec.StorageClassName == nil || *saved.Spec.StorageClassName != "topolvm-thin" {
+	if saved.Spec.StorageClassName == nil || *saved.Spec.StorageClassName != testSCName {
 		t.Error("StorageClassName should be preserved")
 	}
 
