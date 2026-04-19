@@ -43,6 +43,12 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
 
+  # Namespaces — BackupPolicy reconciliation may need to set privileged mover
+  # annotation when policy requests custom mover security context
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "patch"]
+
   # omnivol CRDs — provisioner reads; controllers read and write status
   - apiGroups: ["omnivol.smoothify.com"]
     resources: ["backuppolicies", "backupstores"]

@@ -19,23 +19,39 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	omniv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
+	"github.com/smoothify/omnivol/internal/backend"
+	volsyncbackend "github.com/smoothify/omnivol/internal/backend/volsync"
+	"github.com/smoothify/omnivol/internal/stagger"
 )
 
 const (
 	// policyResyncPeriod is how often the BackupPolicy reconciler rescans managed
 	// PVCs even without an explicit spec-change event.
 	policyResyncPeriod = 5 * time.Minute
+
+	paramBackupPolicy           = "backupPolicy"
+	paramUnderlyingStorageClass = "underlyingStorageClass"
+	annScheduleOverride         = "omnivol.smoothify.com/schedule"
+	annRepoPathOverride         = "omnivol.smoothify.com/repository-path"
+	annUnderlyingPVC            = "omnivol.smoothify.com/underlying-pvc"
+	annUnderlyingNS             = "omnivol.smoothify.com/underlying-namespace"
+	annSelectedNode             = "volume.kubernetes.io/selected-node"
+	annPrivilegedMovers         = "volsync.backube/privileged-movers"
+	underlyingSuffix            = "-omnivol"
 )
 
 // BackupPolicyReconciler reconciles BackupPolicy objects and maintains
@@ -46,9 +62,15 @@ const (
 // +kubebuilder:rbac:groups=omnivol.smoothify.com,resources=backuppolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;create;update;patch;delete
 type BackupPolicyReconciler struct {
 	client.Client
+	Backend             backend.Interface
+	ControllerNamespace string
 }
 
 // SetupWithManager registers the BackupPolicyReconciler with the controller manager.
@@ -98,9 +120,16 @@ func (r *BackupPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	count, err := r.countManagedPVCs(ctx, policy.Name)
+	managedPVCs, err := r.listManagedPVCs(ctx, policy.Name)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	count := len(managedPVCs)
+
+	if storeReady {
+		if err := r.reconcileManagedPVCBackups(ctx, policy, store, managedPVCs); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Re-fetch before status update to avoid conflicts.
@@ -138,41 +167,234 @@ func (r *BackupPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{RequeueAfter: policyResyncPeriod}, nil
 }
 
-// countManagedPVCs returns the number of PVCs whose StorageClass references policyName.
-func (r *BackupPolicyReconciler) countManagedPVCs(ctx context.Context, policyName string) (int, error) {
+// managedPVCRef ties a user PVC to the StorageClass that references its BackupPolicy.
+type managedPVCRef struct {
+	PVC *corev1.PersistentVolumeClaim
+	SC  *storagev1.StorageClass
+}
+
+// listManagedPVCs returns PVCs whose StorageClass references policyName.
+func (r *BackupPolicyReconciler) listManagedPVCs(ctx context.Context, policyName string) ([]managedPVCRef, error) {
 	// Find all StorageClasses backed by our provisioner that reference this policy.
 	scList := &storagev1.StorageClassList{}
 	if err := r.List(ctx, scList); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	scNames := map[string]struct{}{}
-	for _, sc := range scList.Items {
+	scByName := map[string]*storagev1.StorageClass{}
+	for i := range scList.Items {
+		sc := &scList.Items[i]
 		if sc.Provisioner == "omnivol.smoothify.com/provisioner" {
-			if sc.Parameters["backupPolicy"] == policyName {
-				scNames[sc.Name] = struct{}{}
+			if sc.Parameters[paramBackupPolicy] == policyName {
+				scByName[sc.Name] = sc
 			}
 		}
 	}
-	if len(scNames) == 0 {
-		return 0, nil
+	if len(scByName) == 0 {
+		return nil, nil
 	}
 
 	// Count user PVCs using those StorageClasses (excludes the -omnivol underlying PVCs,
 	// which are on the real underlying StorageClass).
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcList); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	count := 0
-	for _, pvc := range pvcList.Items {
+	managed := make([]managedPVCRef, 0)
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
 		if pvc.Spec.StorageClassName == nil {
 			continue
 		}
-		if _, ok := scNames[*pvc.Spec.StorageClassName]; ok {
-			count++
+		sc, ok := scByName[*pvc.Spec.StorageClassName]
+		if !ok {
+			continue
+		}
+		managed = append(managed, managedPVCRef{PVC: pvc, SC: sc})
+	}
+	return managed, nil
+}
+
+func (r *BackupPolicyReconciler) reconcileManagedPVCBackups(
+	ctx context.Context,
+	policy *omniv1alpha1.BackupPolicy,
+	store *omniv1alpha1.BackupStore,
+	managedPVCs []managedPVCRef,
+) error {
+	if r.Backend == nil {
+		r.Backend = volsyncbackend.New(r.Client)
+	}
+
+	controllerNS := r.ControllerNamespace
+	if controllerNS == "" {
+		controllerNS = os.Getenv("POD_NAMESPACE")
+		if controllerNS == "" {
+			controllerNS = "omnivol-system"
 		}
 	}
-	return count, nil
+
+	for _, ref := range managedPVCs {
+		pvc := ref.PVC
+		if pvc.DeletionTimestamp != nil || pvc.Status.Phase != corev1.ClaimBound {
+			continue
+		}
+
+		if err := r.ensurePrivilegedMoversAnnotation(ctx, pvc.Namespace, policy); err != nil {
+			return fmt.Errorf("ensure privileged movers annotation for namespace %q: %w", pvc.Namespace, err)
+		}
+
+		sourcePVC, underlyingSC, err := r.resolveSourcePVC(ctx, pvc, ref.SC)
+		if err != nil {
+			return fmt.Errorf("resolve source PVC for %s/%s: %w", pvc.Namespace, pvc.Name, err)
+		}
+
+		repoPath := computeRepoPath(pvc, policy)
+		schedule, err := stagger.ApplyStagger(effectiveSchedule(pvc, policy), pvc.UID)
+		if err != nil {
+			return fmt.Errorf("compute staggered schedule for %s/%s: %w", pvc.Namespace, pvc.Name, err)
+		}
+
+		params := backend.EnsureParams{
+			Client:                     r.Client,
+			Policy:                     policy,
+			Store:                      store,
+			UnderlyingPVC:              sourcePVC,
+			RepoPath:                   repoPath,
+			Schedule:                   schedule,
+			ResticSecretName:           "omnivol-" + pvc.Name,
+			UserPVCName:                pvc.Name,
+			UserPVCNamespace:           pvc.Namespace,
+			ControllerNamespace:        controllerNS,
+			UnderlyingStorageClassName: underlyingSC,
+			NodeName:                   sourcePVC.Annotations[annSelectedNode],
+		}
+
+		if err := r.Backend.EnsureReplicationSource(ctx, params); err != nil {
+			return fmt.Errorf("ensure ReplicationSource for %s/%s: %w", pvc.Namespace, pvc.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (r *BackupPolicyReconciler) resolveSourcePVC(
+	ctx context.Context,
+	userPVC *corev1.PersistentVolumeClaim,
+	sc *storagev1.StorageClass,
+) (*corev1.PersistentVolumeClaim, string, error) {
+	underlyingName := userPVC.Name + underlyingSuffix
+	underlying := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: userPVC.Namespace}, underlying)
+	if err == nil {
+		underlyingSC := sc.Parameters[paramUnderlyingStorageClass]
+		if underlyingSC == "" && underlying.Spec.StorageClassName != nil {
+			underlyingSC = *underlying.Spec.StorageClassName
+		}
+		if underlyingSC == "" {
+			return nil, "", fmt.Errorf("no underlying StorageClass found for %s/%s", userPVC.Namespace, userPVC.Name)
+		}
+		return underlying, underlyingSC, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, "", err
+	}
+
+	if err := r.patchPVUnderlyingRefIfStale(ctx, userPVC); err != nil {
+		return nil, "", err
+	}
+
+	underlyingSC := sc.Parameters[paramUnderlyingStorageClass]
+	if underlyingSC == "" {
+		if userPVC.Spec.StorageClassName != nil {
+			underlyingSC = *userPVC.Spec.StorageClassName
+		}
+	}
+	if underlyingSC == "" {
+		return nil, "", fmt.Errorf("no underlying StorageClass found for %s/%s", userPVC.Namespace, userPVC.Name)
+	}
+
+	// Backward compatibility: clusters provisioned before the dedicated underlying
+	// PVC naming change may not have <name>-omnivol objects. In that case, use the
+	// user PVC itself as VolSync source.
+	return userPVC.DeepCopy(), underlyingSC, nil
+}
+
+func (r *BackupPolicyReconciler) patchPVUnderlyingRefIfStale(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	if pvc.Spec.VolumeName == "" {
+		return nil
+	}
+
+	pv := &corev1.PersistentVolume{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	ann := pv.GetAnnotations()
+	if ann == nil {
+		return nil
+	}
+
+	underlyingName := ann[annUnderlyingPVC]
+	underlyingNS := ann[annUnderlyingNS]
+	if underlyingName == "" {
+		return nil
+	}
+	if underlyingNS == "" {
+		underlyingNS = pvc.Namespace
+	}
+
+	underlyingPVC := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, types.NamespacedName{Name: underlyingName, Namespace: underlyingNS}, underlyingPVC)
+	if err == nil || !apierrors.IsNotFound(err) {
+		return client.IgnoreNotFound(err)
+	}
+
+	patch := client.MergeFrom(pv.DeepCopy())
+	pv.Annotations[annUnderlyingPVC] = pvc.Name
+	pv.Annotations[annUnderlyingNS] = pvc.Namespace
+	if err := r.Patch(ctx, pv, patch); err != nil {
+		return fmt.Errorf("patch PV %q underlying annotations: %w", pv.Name, err)
+	}
+
+	return nil
+}
+
+func (r *BackupPolicyReconciler) ensurePrivilegedMoversAnnotation(ctx context.Context, namespace string, policy *omniv1alpha1.BackupPolicy) error {
+	if policy.Spec.MoverSecurityContext == nil {
+		return nil
+	}
+
+	ns := &corev1.Namespace{}
+	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, ns); err != nil {
+		return err
+	}
+
+	if ns.Annotations != nil && ns.Annotations[annPrivilegedMovers] == "true" {
+		return nil
+	}
+
+	patch := client.MergeFrom(ns.DeepCopy())
+	if ns.Annotations == nil {
+		ns.Annotations = map[string]string{}
+	}
+	ns.Annotations[annPrivilegedMovers] = "true"
+	return r.Patch(ctx, ns, patch)
+}
+
+func computeRepoPath(pvc *corev1.PersistentVolumeClaim, policy *omniv1alpha1.BackupPolicy) string {
+	if v, ok := pvc.Annotations[annRepoPathOverride]; ok && v != "" {
+		return v
+	}
+	if policy.Spec.RepositoryPath != "" {
+		return fmt.Sprintf("%s/%s/%s", policy.Spec.RepositoryPath, pvc.Namespace, pvc.Name)
+	}
+	return fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name)
+}
+
+func effectiveSchedule(pvc *corev1.PersistentVolumeClaim, policy *omniv1alpha1.BackupPolicy) string {
+	if v, ok := pvc.Annotations[annScheduleOverride]; ok && v != "" {
+		return v
+	}
+	return policy.Spec.Schedule
 }
