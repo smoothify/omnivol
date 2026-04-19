@@ -82,9 +82,9 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${NEW_TAG#v}" >> "$GITHUB_OUTPUT"
         env:
-          GITHUB_REF_NAME: ${{ needs.release.outputs.new_tag }}
+          NEW_TAG: ${{ needs.release.outputs.new_tag }}
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
