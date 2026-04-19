@@ -26,6 +26,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+
+      - name: Cache tools
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: tools-${{ runner.os }}-${{ hashFiles('go.sum', 'Makefile') }}
+          restore-keys: tools-${{ runner.os }}-
 
       - name: Check linter configuration
         run: make lint-config
@@ -44,11 +52,17 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+
+      - name: Cache tools
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: tools-${{ runner.os }}-${{ hashFiles('go.sum', 'Makefile') }}
+          restore-keys: tools-${{ runner.os }}-
 
       - name: Run tests
-        run: |
-          go mod tidy
-          make test
+        run: make test
 
   test-e2e:
     name: E2E tests
@@ -61,20 +75,34 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+
+      - name: Cache tools
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: tools-${{ runner.os }}-${{ hashFiles('go.sum', 'Makefile') }}
+          restore-keys: tools-${{ runner.os }}-
+
+      - name: Cache kind binary
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/kind
+          key: kind-${{ runner.os }}-${{ runner.arch }}-latest
 
       - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          if ! command -v kind &>/dev/null; then
+            curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+            chmod +x ./kind
+            sudo mv ./kind /usr/local/bin/kind
+          fi
 
       - name: Verify kind installation
         run: kind version
 
       - name: Run E2E tests
-        run: |
-          go mod tidy
-          make test-e2e
+        run: make test-e2e
 
   build:
     name: Build (${{ matrix.platform }})
