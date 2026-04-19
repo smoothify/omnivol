@@ -2,8 +2,8 @@ apiVersion: v2
 name: omnivol
 description: Kubernetes backup and migration controller with VolSync integration
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 1.0.0
+appVersion: "1.0.0"
 home: https://github.com/smoothify/omnivol
 keywords:
   - kubernetes
