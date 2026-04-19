@@ -56,11 +56,23 @@ const (
 	// annRestoreInProgress is set on PVCs while a restore is being performed.
 	annRestoreInProgress = "omnivol.smoothify.com/restore-in-progress"
 
+	// annMigrating is set on PVCs while a migration is in progress.
+	annMigrating = "omnivol.smoothify.com/migrating"
+
 	// annPrivilegedMovers is the VolSync namespace annotation.
 	pvcAnnPrivilegedMovers = "volsync.backube/privileged-movers"
 
+	// schedulingGateName is the scheduling gate added to pods referencing
+	// PVCs that are being restored.  The gate prevents the pod from being
+	// scheduled until the restore is complete.
+	schedulingGateName = "omnivol.smoothify.com/restore-pending"
+
 	// pvcResyncPeriod is how often the PVC reconciler rescans managed PVCs.
 	pvcResyncPeriod = 5 * time.Minute
+
+	// freshSyncThreshold is the maximum age of the last sync for it to be
+	// considered "fresh enough" to proceed with migration.
+	freshSyncThreshold = 5 * time.Minute
 )
 
 // PVCReconciler watches PVCs with the omnivol.smoothify.com/backup-policy label
@@ -78,6 +90,7 @@ const (
 // +kubebuilder:rbac:groups=omnivol.smoothify.com,resources=backupstores,verbs=get;list;watch
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationdestinations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 type PVCReconciler struct {
 	client.Client
 	Backend             backend.Interface
@@ -94,6 +107,11 @@ func (r *PVCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&omniv1alpha1.BackupPolicy{},
 			handler.EnqueueRequestsFromMapFunc(r.mapBackupPolicyToPVCs),
+		).
+		// Re-reconcile managed PVCs when a Node becomes cordoned.
+		Watches(
+			&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(r.mapNodeToPVCs),
 		).
 		Complete(r)
 }
@@ -247,9 +265,39 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 	}
 
+	// --- Auto-migration check ---
+	// If the PVC's PV is on a cordoned node and auto-migrate is enabled,
+	// initiate migration: final sync → delete PVC → recreate → restore.
+	if r.isAutoMigrateEnabled(pvc, policy) && nodeName != "" {
+		nodeObj := &corev1.Node{}
+		if err := r.Get(ctx, types.NamespacedName{Name: nodeName}, nodeObj); err == nil {
+			if nodeObj.Spec.Unschedulable && pvc.Annotations[annMigrating] != "true" {
+				logger.Info("PVC on cordoned node — initiating migration",
+					"pvc", pvc.Name, "node", nodeName)
+
+				result, err := r.handleMigration(ctx, pvc, params, nodeName)
+				if err != nil {
+					logger.Error(err, "Migration failed", "pvc", pvc.Name)
+				}
+				return result, err
+			}
+		}
+	}
+
 	// Ensure ReplicationSource exists for ongoing backups.
 	if err := r.Backend.EnsureReplicationSource(ctx, params); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure ReplicationSource: %w", err)
+	}
+
+	// Manage scheduling gates for pods referencing this PVC.
+	if pvc.Annotations[annRestoreInProgress] == "true" {
+		if err := r.addSchedulingGates(ctx, pvc); err != nil {
+			logger.Error(err, "Could not add scheduling gates", "pvc", pvc.Name)
+		}
+	} else {
+		if err := r.removeSchedulingGates(ctx, pvc); err != nil {
+			logger.Error(err, "Could not remove scheduling gates", "pvc", pvc.Name)
+		}
 	}
 
 	// Update BackupPolicy status.
@@ -367,6 +415,258 @@ func (r *PVCReconciler) mapBackupPolicyToPVCs(ctx context.Context, obj client.Ob
 		})
 	}
 	return requests
+}
+
+// mapNodeToPVCs returns reconcile requests for all managed PVCs whose PV
+// is pinned to the changed Node.  This ensures PVCs are re-reconciled
+// when a node is cordoned (for auto-migration).
+func (r *PVCReconciler) mapNodeToPVCs(ctx context.Context, obj client.Object) []reconcile.Request {
+	node, ok := obj.(*corev1.Node)
+	if !ok {
+		return nil
+	}
+
+	// Only trigger for cordoned nodes.
+	if !node.Spec.Unschedulable {
+		return nil
+	}
+
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcList, client.HasLabels{labelBackupPolicy}); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, pvc := range pvcList.Items {
+		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
+			continue
+		}
+		// Check if the PV is pinned to this node.
+		pv := &corev1.PersistentVolume{}
+		if err := r.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+			continue
+		}
+		if nodeNameFromPV(pv) == node.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      pvc.Name,
+					Namespace: pvc.Namespace,
+				},
+			})
+		}
+	}
+	return requests
+}
+
+// isAutoMigrateEnabled checks whether auto-migration is enabled for the PVC.
+// Per-PVC annotation overrides the BackupPolicy spec.
+func (r *PVCReconciler) isAutoMigrateEnabled(pvc *corev1.PersistentVolumeClaim, policy *omniv1alpha1.BackupPolicy) bool {
+	if v, ok := pvc.Annotations[annAutoMigrate]; ok {
+		return v == "true"
+	}
+	return policy.Spec.AutoMigrate
+}
+
+// handleMigration orchestrates the full migration flow:
+// 1. Ensure last sync is fresh
+// 2. Save PVC spec
+// 3. Clean up backend resources (RS, RD, Secret)
+// 4. Delete PVC (PV cascades via reclaim policy)
+// 5. Recreate PVC with saved spec
+// The next reconcile will detect the backup in S3 and restore.
+func (r *PVCReconciler) handleMigration(ctx context.Context, pvc *corev1.PersistentVolumeClaim, params backend.EnsureParams, nodeName string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Step 1: Check if we have a fresh backup.
+	rs := &volsyncv1alpha1.ReplicationSource{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, rs); err != nil {
+		if apierrors.IsNotFound(err) {
+			// No RS yet — trigger a sync first, then requeue.
+			logger.Info("No ReplicationSource found, creating before migration", "pvc", pvc.Name)
+			if err := r.Backend.EnsureReplicationSource(ctx, params); err != nil {
+				return ctrl.Result{}, fmt.Errorf("ensure RS before migration: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Check if the last sync is recent enough.
+	if rs.Status.LastSyncTime == nil || time.Since(rs.Status.LastSyncTime.Time) > freshSyncThreshold {
+		logger.Info("Triggering final sync before migration", "pvc", pvc.Name)
+		if err := r.Backend.TriggerFinalSync(ctx, pvc.Name, pvc.Namespace); err != nil {
+			logger.Error(err, "Could not trigger final sync for migration", "pvc", pvc.Name)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		// Sync triggered (and waited for) — continue with migration.
+	}
+
+	logger.Info("Backup is fresh — proceeding with migration", "pvc", pvc.Name, "node", nodeName)
+
+	// Step 2: Save the PVC spec for recreation.
+	savedPVC := savePVCSpec(pvc)
+
+	// Step 3: Clean up backend resources before deleting the PVC.
+	// This prevents the orphan controller from racing.
+	if err := r.Backend.Cleanup(ctx, pvc.Name, pvc.Namespace); err != nil {
+		logger.Error(err, "Could not cleanup backend resources before migration", "pvc", pvc.Name)
+		// Continue anyway — the orphan controller will clean up.
+	}
+
+	// Step 4: Delete the old PVC.
+	logger.Info("Deleting PVC for migration", "pvc", pvc.Name, "node", nodeName)
+	if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("delete PVC for migration: %w", err)
+	}
+
+	// Step 5: Recreate PVC with saved spec (minus volumeName binding).
+	logger.Info("Recreating PVC for migration", "pvc", savedPVC.Name)
+	if err := r.Create(ctx, savedPVC); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// PVC was recreated by something else (e.g. StatefulSet) — that's fine.
+			logger.Info("PVC already recreated", "pvc", savedPVC.Name)
+		} else {
+			return ctrl.Result{}, fmt.Errorf("recreate PVC: %w", err)
+		}
+	}
+
+	// Next reconcile will detect the unbound PVC, find the backup in S3,
+	// and restore automatically.
+	logger.Info("Migration PVC recreated — restore will happen on next reconcile", "pvc", savedPVC.Name)
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// savePVCSpec creates a new PVC object from the saved spec, stripping
+// binding-specific fields so it can be recreated on a new node.
+func savePVCSpec(pvc *corev1.PersistentVolumeClaim) *corev1.PersistentVolumeClaim {
+	// Deep copy labels and annotations.
+	labels := make(map[string]string, len(pvc.Labels))
+	for k, v := range pvc.Labels {
+		labels[k] = v
+	}
+	annotations := make(map[string]string)
+	for k, v := range pvc.Annotations {
+		// Skip transient annotations.
+		if k == annRestoreInProgress || k == annMigrating {
+			continue
+		}
+		// Skip the selected-node annotation — let the scheduler pick.
+		if k == "volume.kubernetes.io/selected-node" {
+			continue
+		}
+		annotations[k] = v
+	}
+
+	newPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        pvc.Name,
+			Namespace:   pvc.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: pvc.Spec.StorageClassName,
+			AccessModes:      pvc.Spec.AccessModes,
+			Resources:        pvc.Spec.Resources,
+			// VolumeName is intentionally omitted — let the provisioner
+			// create a new PV on whatever node the scheduler picks.
+		},
+	}
+
+	return newPVC
+}
+
+// addSchedulingGates adds the omnivol scheduling gate to all pods that
+// reference the given PVC and don't already have the gate.
+func (r *PVCReconciler) addSchedulingGates(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	pods, err := r.podsReferencingPVC(ctx, pvc)
+	if err != nil {
+		return err
+	}
+
+	for i := range pods {
+		pod := &pods[i]
+		if hasSchedulingGate(pod) {
+			continue
+		}
+		// Only gate pods that haven't been scheduled yet.
+		if pod.Spec.NodeName != "" {
+			continue
+		}
+
+		patch := client.MergeFrom(pod.DeepCopy())
+		pod.Spec.SchedulingGates = append(pod.Spec.SchedulingGates, corev1.PodSchedulingGate{
+			Name: schedulingGateName,
+		})
+		if err := r.Patch(ctx, pod, patch); err != nil {
+			if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+				continue
+			}
+			return fmt.Errorf("add scheduling gate to pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+	}
+	return nil
+}
+
+// removeSchedulingGates removes the omnivol scheduling gate from all pods
+// that reference the given PVC.
+func (r *PVCReconciler) removeSchedulingGates(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	pods, err := r.podsReferencingPVC(ctx, pvc)
+	if err != nil {
+		return err
+	}
+
+	for i := range pods {
+		pod := &pods[i]
+		if !hasSchedulingGate(pod) {
+			continue
+		}
+
+		patch := client.MergeFrom(pod.DeepCopy())
+		newGates := make([]corev1.PodSchedulingGate, 0, len(pod.Spec.SchedulingGates))
+		for _, g := range pod.Spec.SchedulingGates {
+			if g.Name != schedulingGateName {
+				newGates = append(newGates, g)
+			}
+		}
+		pod.Spec.SchedulingGates = newGates
+		if err := r.Patch(ctx, pod, patch); err != nil {
+			if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+				continue
+			}
+			return fmt.Errorf("remove scheduling gate from pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+	}
+	return nil
+}
+
+// podsReferencingPVC returns all pods in the same namespace that mount the given PVC.
+func (r *PVCReconciler) podsReferencingPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) ([]corev1.Pod, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(pvc.Namespace)); err != nil {
+		return nil, err
+	}
+
+	var result []corev1.Pod
+	for _, pod := range podList.Items {
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
+				result = append(result, pod)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+// hasSchedulingGate returns true if the pod has the omnivol restore-pending gate.
+func hasSchedulingGate(pod *corev1.Pod) bool {
+	for _, g := range pod.Spec.SchedulingGates {
+		if g.Name == schedulingGateName {
+			return true
+		}
+	}
+	return false
 }
 
 // computeRepoPath returns the effective restic repository path for a PVC.

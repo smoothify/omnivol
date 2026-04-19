@@ -471,6 +471,252 @@ func TestBackupOnDelete_PVCAnnotationOptOut(t *testing.T) {
 	}
 }
 
+// --- Auto-migrate tests ---
+
+func TestIsAutoMigrateEnabled_PolicyDefault(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
+	}
+	policy := &omniv1alpha1.BackupPolicy{
+		Spec: omniv1alpha1.BackupPolicySpec{AutoMigrate: true},
+	}
+
+	r := &PVCReconciler{}
+	if !r.isAutoMigrateEnabled(pvc, policy) {
+		t.Error("expected true (policy default)")
+	}
+}
+
+func TestIsAutoMigrateEnabled_PVCOverrideFalse(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "data",
+			Namespace:   "default",
+			Annotations: map[string]string{annAutoMigrate: "false"},
+		},
+	}
+	policy := &omniv1alpha1.BackupPolicy{
+		Spec: omniv1alpha1.BackupPolicySpec{AutoMigrate: true},
+	}
+
+	r := &PVCReconciler{}
+	if r.isAutoMigrateEnabled(pvc, policy) {
+		t.Error("expected false (PVC annotation overrides policy)")
+	}
+}
+
+func TestIsAutoMigrateEnabled_PVCOverrideTrue(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "data",
+			Namespace:   "default",
+			Annotations: map[string]string{annAutoMigrate: "true"},
+		},
+	}
+	policy := &omniv1alpha1.BackupPolicy{
+		Spec: omniv1alpha1.BackupPolicySpec{AutoMigrate: false},
+	}
+
+	r := &PVCReconciler{}
+	if !r.isAutoMigrateEnabled(pvc, policy) {
+		t.Error("expected true (PVC annotation overrides policy)")
+	}
+}
+
+// --- savePVCSpec tests ---
+
+func TestSavePVCSpec_StripsBindingFields(t *testing.T) {
+	scName := "topolvm-thin"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "prod",
+			Labels:    map[string]string{labelBackupPolicy: "hourly", "app": "myapp"},
+			Annotations: map[string]string{
+				annScheduleOverride:                      "30 2 * * *",
+				annRestoreInProgress:                     "true",
+				annMigrating:                             "true",
+				"volume.kubernetes.io/selected-node":     "worker-1",
+				"pv.kubernetes.io/bind-completed":        "yes",
+			},
+			UID:             "old-uid",
+			ResourceVersion: "12345",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			VolumeName:       "pv-data",
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("10Gi"),
+				},
+			},
+		},
+	}
+
+	saved := savePVCSpec(pvc)
+
+	// Should preserve name, namespace, labels.
+	if saved.Name != "data" {
+		t.Errorf("Name = %q, want %q", saved.Name, "data")
+	}
+	if saved.Namespace != "prod" {
+		t.Errorf("Namespace = %q, want %q", saved.Namespace, "prod")
+	}
+	if saved.Labels[labelBackupPolicy] != "hourly" {
+		t.Error("backup-policy label missing")
+	}
+	if saved.Labels["app"] != "myapp" {
+		t.Error("app label missing")
+	}
+
+	// Should strip transient annotations.
+	if _, ok := saved.Annotations[annRestoreInProgress]; ok {
+		t.Error("restore-in-progress annotation should be stripped")
+	}
+	if _, ok := saved.Annotations[annMigrating]; ok {
+		t.Error("migrating annotation should be stripped")
+	}
+	if _, ok := saved.Annotations["volume.kubernetes.io/selected-node"]; ok {
+		t.Error("selected-node annotation should be stripped")
+	}
+
+	// Should keep user-set annotations.
+	if saved.Annotations[annScheduleOverride] != "30 2 * * *" {
+		t.Error("schedule override annotation should be preserved")
+	}
+
+	// Should clear VolumeName.
+	if saved.Spec.VolumeName != "" {
+		t.Errorf("VolumeName = %q, want empty", saved.Spec.VolumeName)
+	}
+
+	// Should preserve storage class and resources.
+	if saved.Spec.StorageClassName == nil || *saved.Spec.StorageClassName != "topolvm-thin" {
+		t.Error("StorageClassName should be preserved")
+	}
+
+	// UID and ResourceVersion should be empty (new object).
+	if saved.UID != "" {
+		t.Error("UID should be empty")
+	}
+	if saved.ResourceVersion != "" {
+		t.Error("ResourceVersion should be empty")
+	}
+}
+
+// --- Scheduling gate tests ---
+
+func TestSchedulingGate_AddAndRemove(t *testing.T) {
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "default",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
+		},
+	}
+
+	// Unscheduled pod referencing the PVC.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					},
+				},
+			}},
+			Containers: []corev1.Container{{
+				Name:  "app",
+				Image: "nginx",
+			}},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(pvc, pod).Build()
+
+	r := &PVCReconciler{Client: c}
+
+	// Add gate.
+	if err := r.addSchedulingGates(ctx, pvc); err != nil {
+		t.Fatalf("addSchedulingGates() error = %v", err)
+	}
+
+	updated := &corev1.Pod{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "app-0", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if !hasSchedulingGate(updated) {
+		t.Error("expected scheduling gate to be added")
+	}
+
+	// Remove gate.
+	if err := r.removeSchedulingGates(ctx, pvc); err != nil {
+		t.Fatalf("removeSchedulingGates() error = %v", err)
+	}
+
+	if err := c.Get(ctx, types.NamespacedName{Name: "app-0", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if hasSchedulingGate(updated) {
+		t.Error("expected scheduling gate to be removed")
+	}
+}
+
+func TestSchedulingGate_SkipsScheduledPods(t *testing.T) {
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "default",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
+		},
+	}
+
+	// Already-scheduled pod.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			NodeName: "worker-1",
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					},
+				},
+			}},
+			Containers: []corev1.Container{{
+				Name:  "app",
+				Image: "nginx",
+			}},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(pvc, pod).Build()
+
+	r := &PVCReconciler{Client: c}
+
+	if err := r.addSchedulingGates(ctx, pvc); err != nil {
+		t.Fatalf("addSchedulingGates() error = %v", err)
+	}
+
+	updated := &corev1.Pod{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "app-0", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if hasSchedulingGate(updated) {
+		t.Error("scheduled pods should NOT get scheduling gates")
+	}
+}
+
 // --- Helpers ---
 
 func ptr[T any](v T) *T { return &v }
