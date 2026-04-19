@@ -1,6 +1,6 @@
 apiVersion: v2
 name: omnivol
-description: Kubernetes external provisioner with VolSync backup/restore integration
+description: Kubernetes backup and migration controller with VolSync integration
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -8,8 +8,8 @@ home: https://github.com/smoothify/omnivol
 keywords:
   - kubernetes
   - storage
-  - provisioner
   - backup
+  - migration
   - volsync
   - restic
   - s3

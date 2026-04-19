@@ -5,42 +5,42 @@ metadata:
   labels:
     {{- include "omnivol.labels" . | nindent 4 }}
 rules:
-  # PersistentVolumes — provisioner creates and deletes PVs
+  # PersistentVolumes — read-only for node affinity resolution
   - apiGroups: [""]
     resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch"]
 
-  # PersistentVolumeClaims — provisioner creates/deletes underlying PVCs
+  # PersistentVolumeClaims — PVC controller manages backups and migration
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims/status"]
-    verbs: ["get", "update", "patch"]
 
-  # StorageClasses — provisioner reads StorageClass parameters
+  # StorageClasses — read-only for cache PVC storage class
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
 
-  # Secrets — provisioner creates restic credential secrets;
-  # BackupStore controller reads credential secrets;
-  # Orphan controller deletes orphaned restic secrets
+  # Secrets — restic credential secrets
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Events — external-provisioner and drain watcher emit events
+  # Events — drain watcher emits events
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "update", "patch"]
 
-  # Nodes — drain watcher
+  # Nodes — drain watcher, auto-migration
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
 
-  # Pods — backup-protection finalizer controller
+  # Namespaces — privileged-movers annotation
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "patch"]
+
+  # Pods — backup-protection finalizer, scheduling gates
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "update", "patch"]

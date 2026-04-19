@@ -42,11 +42,6 @@ spec:
             - --leader-elect
             {{- end }}
             - --health-probe-bind-address=:{{ .Values.healthProbes.port }}
-            {{- if .Values.controller.defaultDeletePVCAfterBackup }}
-            - --default-delete-pvc-after-backup
-            {{- else }}
-            - --default-delete-pvc-after-backup=false
-            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

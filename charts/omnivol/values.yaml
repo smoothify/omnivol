@@ -69,12 +69,6 @@ leaderElection:
   # -- Enable leader election for controller manager.
   enabled: true
 
-controller:
-  # -- Default for delete-pvc-after-backup when no annotation overrides it.
-  # When true, PVCs backed by Omnivol are deleted after a successful final backup,
-  # allowing StatefulSet pods to reschedule on new nodes without data loss.
-  defaultDeletePVCAfterBackup: true
-
 healthProbes:
   # -- Port for health probes (/healthz and /readyz).
   port: 8081
