@@ -37,9 +37,8 @@ spec:
       openAPIV3Schema:
         description: |-
           BackupPolicy is the Schema for the backuppolicies API.
-          A BackupPolicy describes HOW and WHEN backups are taken, and which underlying
-          StorageClass provides the real PV.  A StorageClass references a BackupPolicy
-          via the "backupPolicy" parameter, tying PVC creation to this policy.
+          A BackupPolicy describes HOW and WHEN backups are taken.  PVCs reference a
+          BackupPolicy via the label omnivol.smoothify.com/backup-policy=<name>.
         properties:
           apiVersion:
             description: |-
@@ -61,6 +60,15 @@ spec:
           spec:
             description: spec defines the desired state of BackupPolicy.
             properties:
+              autoMigrate:
+                default: false
+                description: |-
+                  autoMigrate controls whether PVCs governed by this policy are automatically
+                  migrated off nodes that become cordoned or NotReady.  When true, omnivol
+                  triggers a final backup, deletes the PVC (cascade-deleting the PV), recreates
+                  the PVC, and restores from backup on the new node.
+                  Individual PVCs may override via the omnivol.smoothify.com/auto-migrate annotation.
+                type: boolean
               backupStore:
                 description: |-
                   backupStore is the name of the BackupStore (cluster-scoped) that provides
@@ -77,11 +85,6 @@ spec:
                 - Clone
                 - Snapshot
                 - Direct
-                type: string
-              deleteTimeout:
-                description: |-
-                  deleteTimeout is the maximum duration to wait for a final pre-delete backup
-                  to complete before forcibly removing the PVC.  Defaults to 5 minutes if not set.
                 type: string
               moverSecurityContext:
                 description: |-
@@ -335,13 +338,6 @@ spec:
                   Individual PVCs may override via the omnivol.smoothify.com/repository-path annotation.
                   If empty the path defaults to "/<pvcNamespace>/<pvcName>".
                 type: string
-              restoreOnCreate:
-                default: true
-                description: |-
-                  restoreOnCreate controls whether the provisioner blocks PV binding until
-                  a restore from the latest S3 backup completes (when a prior backup exists).
-                  Defaults to true.
-                type: boolean
               retain:
                 description: retain defines how many snapshots to keep.
                 properties:

@@ -21,7 +21,6 @@ package volsync
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
@@ -41,9 +40,6 @@ import (
 )
 
 const (
-	// underlyingSuffix is appended to the user PVC name to form the underlying PVC name.
-	underlyingSuffix = "-omnivol"
-
 	pollInterval = 5 * time.Second
 	pollTimeout  = 10 * time.Minute
 )
@@ -61,16 +57,12 @@ func New(c client.Client) *Backend {
 // Name implements backend.Interface.
 func (b *Backend) Name() string { return "volsync" }
 
-// BackupExists checks whether the restic repository at repoPath already
-// contains at least one object, indicating that a prior backup exists.
-// It requires that the BackupStore S3 credentials are already readable from the
-// cluster (the caller is responsible for loading them).
-func (b *Backend) BackupExists(ctx context.Context, repoPath string) (bool, error) {
-	// BackupExists is called before we have constructed the full EnsureParams,
-	// so the caller must use the s3check package directly.  This method is a
-	// convenience shim — real callers use s3check.Client directly.
-	_ = repoPath
-	return false, fmt.Errorf("BackupExists must be called via s3check.Client directly; use EnsureParams flow")
+// storageClassName returns the StorageClass name from a PVC, or empty string if not set.
+func storageClassName(pvc *corev1.PersistentVolumeClaim) string {
+	if pvc.Spec.StorageClassName != nil {
+		return *pvc.Spec.StorageClassName
+	}
+	return ""
 }
 
 // EnsureReplicationSource creates or updates the VolSync ReplicationSource.
@@ -88,8 +80,9 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 	}
 
 	copyMethod := volsyncv1alpha1.CopyMethodType(params.Policy.Spec.CopyMethod)
-	pvcName := params.UnderlyingPVC.Name
-	ns := params.UnderlyingPVC.Namespace
+	pvcName := params.PVC.Name
+	ns := params.PVC.Namespace
+	sc := storageClassName(params.PVC)
 
 	rs := &volsyncv1alpha1.ReplicationSource{
 		ObjectMeta: metav1.ObjectMeta{
@@ -99,8 +92,8 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 				"omnivol.smoothify.com/managed-by": "omnivol",
 			},
 			Annotations: map[string]string{
-				"omnivol.smoothify.com/owner-pvc":           params.UserPVCName,
-				"omnivol.smoothify.com/owner-pvc-namespace": params.UserPVCNamespace,
+				"omnivol.smoothify.com/owner-pvc":           pvcName,
+				"omnivol.smoothify.com/owner-pvc-namespace": ns,
 			},
 		},
 	}
@@ -111,8 +104,8 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 		if rs.Annotations == nil {
 			rs.Annotations = map[string]string{}
 		}
-		rs.Annotations["omnivol.smoothify.com/owner-pvc"] = params.UserPVCName
-		rs.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = params.UserPVCNamespace
+		rs.Annotations["omnivol.smoothify.com/owner-pvc"] = pvcName
+		rs.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = ns
 		rs.Spec = volsyncv1alpha1.ReplicationSourceSpec{
 			SourcePVC: pvcName,
 			Trigger: &volsyncv1alpha1.ReplicationSourceTriggerSpec{
@@ -121,14 +114,14 @@ func (b *Backend) EnsureReplicationSource(ctx context.Context, params backend.En
 			Restic: &volsyncv1alpha1.ReplicationSourceResticSpec{
 				ReplicationSourceVolumeOptions: volsyncv1alpha1.ReplicationSourceVolumeOptions{
 					CopyMethod:              copyMethod,
-					StorageClassName:        &params.UnderlyingStorageClassName,
-					VolumeSnapshotClassName: &params.UnderlyingStorageClassName,
-					AccessModes:             params.UnderlyingPVC.Spec.AccessModes,
+					StorageClassName:        &sc,
+					VolumeSnapshotClassName: &sc,
+					AccessModes:             params.PVC.Spec.AccessModes,
 				},
 				Repository:            params.ResticSecretName,
 				Retain:                buildResticRetainPolicy(params),
 				PruneIntervalDays:     ptr(int32(7)),
-				CacheStorageClassName: &params.UnderlyingStorageClassName,
+				CacheStorageClassName: &sc,
 				CacheAccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				CacheCapacity:         ptr(resource.MustParse("1Gi")),
 				MoverConfig: volsyncv1alpha1.MoverConfig{
@@ -156,9 +149,10 @@ func (b *Backend) ensureCachePVC(ctx context.Context, params backend.EnsureParam
 		return nil
 	}
 
-	cacheName := "volsync-src-" + params.UnderlyingPVC.Name + "-cache"
-	ns := params.UnderlyingPVC.Namespace
+	cacheName := "volsync-src-" + params.PVC.Name + "-cache"
+	ns := params.PVC.Namespace
 	cacheCapacity := resource.MustParse("1Gi")
+	sc := storageClassName(params.PVC)
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -168,7 +162,7 @@ func (b *Backend) ensureCachePVC(ctx context.Context, params backend.EnsureParam
 	}
 
 	// Check if the cache PVC already exists and is bound to the wrong node.
-	// This happens when a StatefulSet pod moves to a new node, but the old cache
+	// This happens when a pod moves to a new node, but the old cache
 	// PVC (from a previous backup) still exists on the old node.
 	err := b.client.Get(ctx, types.NamespacedName{Name: cacheName, Namespace: ns}, pvc)
 	if err == nil {
@@ -198,7 +192,7 @@ func (b *Backend) ensureCachePVC(ctx context.Context, params backend.EnsureParam
 				"volume.kubernetes.io/selected-node": params.NodeName,
 			}
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
-				StorageClassName: &params.UnderlyingStorageClassName,
+				StorageClassName: &sc,
 				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -221,11 +215,12 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 	}
 
 	copyMethod := volsyncv1alpha1.CopyMethodType(params.Policy.Spec.CopyMethod)
-	pvcName := params.UnderlyingPVC.Name
-	ns := params.UnderlyingPVC.Namespace
+	pvcName := params.PVC.Name
+	ns := params.PVC.Namespace
+	sc := storageClassName(params.PVC)
 
-	// Determine capacity from the underlying PVC request.
-	capacity := params.UnderlyingPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+	// Determine capacity from the PVC request.
+	capacity := params.PVC.Spec.Resources.Requests[corev1.ResourceStorage]
 
 	rd := &volsyncv1alpha1.ReplicationDestination{
 		ObjectMeta: metav1.ObjectMeta{
@@ -235,8 +230,8 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 				"omnivol.smoothify.com/managed-by": "omnivol",
 			},
 			Annotations: map[string]string{
-				"omnivol.smoothify.com/owner-pvc":           params.UserPVCName,
-				"omnivol.smoothify.com/owner-pvc-namespace": params.UserPVCNamespace,
+				"omnivol.smoothify.com/owner-pvc":           pvcName,
+				"omnivol.smoothify.com/owner-pvc-namespace": ns,
 			},
 		},
 	}
@@ -245,8 +240,8 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 		if rd.Annotations == nil {
 			rd.Annotations = map[string]string{}
 		}
-		rd.Annotations["omnivol.smoothify.com/owner-pvc"] = params.UserPVCName
-		rd.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = params.UserPVCNamespace
+		rd.Annotations["omnivol.smoothify.com/owner-pvc"] = pvcName
+		rd.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = ns
 		rd.Spec = volsyncv1alpha1.ReplicationDestinationSpec{
 			Trigger: &volsyncv1alpha1.ReplicationDestinationTriggerSpec{
 				Manual: "restore-once",
@@ -254,9 +249,9 @@ func (b *Backend) EnsureReplicationDestination(ctx context.Context, params backe
 			Restic: &volsyncv1alpha1.ReplicationDestinationResticSpec{
 				ReplicationDestinationVolumeOptions: volsyncv1alpha1.ReplicationDestinationVolumeOptions{
 					CopyMethod:       copyMethod,
-					AccessModes:      params.UnderlyingPVC.Spec.AccessModes,
+					AccessModes:      params.PVC.Spec.AccessModes,
 					Capacity:         &capacity,
-					StorageClassName: &params.UnderlyingStorageClassName,
+					StorageClassName: &sc,
 					DestinationPVC:   &pvcName,
 				},
 				Repository: params.ResticSecretName,
@@ -342,15 +337,21 @@ func (b *Backend) Cleanup(ctx context.Context, pvcName, namespace string) error 
 		}
 	}
 
-	// The secret is named "omnivol-<userPVCName>", but pvcName here is the
-	// underlying PVC name (<userPVCName>-omnivol).  Strip the suffix to recover
-	// the user PVC name.
-	userPVCName := strings.TrimSuffix(pvcName, underlyingSuffix)
+	// The secret is named "omnivol-<pvcName>".
 	secret := &corev1.Secret{}
-	secretNN := types.NamespacedName{Name: "omnivol-" + userPVCName, Namespace: namespace}
+	secretNN := types.NamespacedName{Name: "omnivol-" + pvcName, Namespace: namespace}
 	if err := b.client.Get(ctx, secretNN, secret); err == nil {
 		if err := b.client.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete restic secret: %w", err)
+		}
+	}
+
+	// Also clean up cache PVC.
+	cachePVC := &corev1.PersistentVolumeClaim{}
+	cacheNN := types.NamespacedName{Name: "volsync-src-" + pvcName + "-cache", Namespace: namespace}
+	if err := b.client.Get(ctx, cacheNN, cachePVC); err == nil {
+		if err := b.client.Delete(ctx, cachePVC); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete cache PVC: %w", err)
 		}
 	}
 
@@ -358,7 +359,7 @@ func (b *Backend) Cleanup(ctx context.Context, pvcName, namespace string) error 
 }
 
 // ensureResticSecret creates or updates the restic credentials Secret for a PVC.
-// The Secret is named "omnivol-<pvcname>" in the same namespace as the underlying PVC.
+// The Secret is named "omnivol-<pvcname>" in the same namespace as the PVC.
 func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureParams) error {
 	store := params.Store.Spec.S3
 	scheme := "s3"
@@ -382,16 +383,19 @@ func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureP
 		return fmt.Errorf("resolve restic password: %w", err)
 	}
 
+	pvcName := params.PVC.Name
+	ns := params.PVC.Namespace
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      params.ResticSecretName,
-			Namespace: params.UnderlyingPVC.Namespace,
+			Namespace: ns,
 			Labels: map[string]string{
 				"omnivol.smoothify.com/managed-by": "omnivol",
 			},
 			Annotations: map[string]string{
-				"omnivol.smoothify.com/owner-pvc":           params.UserPVCName,
-				"omnivol.smoothify.com/owner-pvc-namespace": params.UserPVCNamespace,
+				"omnivol.smoothify.com/owner-pvc":           pvcName,
+				"omnivol.smoothify.com/owner-pvc-namespace": ns,
 			},
 		},
 	}
@@ -400,8 +404,8 @@ func (b *Backend) ensureResticSecret(ctx context.Context, params backend.EnsureP
 		if secret.Annotations == nil {
 			secret.Annotations = map[string]string{}
 		}
-		secret.Annotations["omnivol.smoothify.com/owner-pvc"] = params.UserPVCName
-		secret.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = params.UserPVCNamespace
+		secret.Annotations["omnivol.smoothify.com/owner-pvc"] = pvcName
+		secret.Annotations["omnivol.smoothify.com/owner-pvc-namespace"] = ns
 		secret.StringData = map[string]string{
 			"RESTIC_REPOSITORY":     repoURL,
 			"RESTIC_PASSWORD":       resticPassword,
@@ -472,8 +476,8 @@ func ptr[T any](v T) *T { return &v }
 // Ensure Backend implements the interface at compile time.
 var _ backend.Interface = (*Backend)(nil)
 
-// S3CheckBackupExists is a helper that wires the s3check client for use by the
-// provisioner without going through the full backend interface.
+// S3CheckBackupExists is a helper that wires the s3check client for use by
+// controllers that need to know whether a prior backup exists.
 func S3CheckBackupExists(ctx context.Context, params backend.EnsureParams, repoPath string) (bool, error) {
 	store := params.Store.Spec.S3
 

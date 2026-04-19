@@ -1,0 +1,23 @@
+# Example PVC that opts into omnivol backup via label.
+# The label value must match a BackupPolicy name (e.g. "hourly").
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gotify-data
+  namespace: monitoring
+  labels:
+    omnivol.smoothify.com/backup-policy: hourly
+  annotations:
+    # Optional: override the backup schedule for this PVC.
+    # omnivol.smoothify.com/schedule: "30 2 * * *"
+    # Optional: enable automatic migration off cordoned nodes.
+    # omnivol.smoothify.com/auto-migrate: "true"
+    # Optional: override the restic repository path.
+    # omnivol.smoothify.com/repository-path: "monitoring/gotify-data"
+spec:
+  storageClassName: topolvm-thin
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

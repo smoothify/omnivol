@@ -19,10 +19,11 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,12 +31,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	omniv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
+	"github.com/smoothify/omnivol/internal/backend"
 )
 
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
-	_ = storagev1.AddToScheme(s)
 	_ = omniv1alpha1.AddToScheme(s)
 	_ = volsyncv1alpha1.AddToScheme(s)
 	return s
@@ -101,63 +102,77 @@ func TestBackupStoreReconciler_MissingStore(t *testing.T) {
 	}
 }
 
-// --- BackupPolicy controller ---
+// --- PVC controller ---
 
-func TestBackupPolicyReconciler_StoreNotFound(t *testing.T) {
+// fakeBackend is a mock backend.Interface for testing.
+type fakeBackend struct {
+	ensureRSCalled bool
+	ensureRDCalled bool
+	cleanupCalled  bool
+}
+
+func (f *fakeBackend) Name() string { return "fake" }
+func (f *fakeBackend) EnsureReplicationSource(_ context.Context, _ backend.EnsureParams) error {
+	f.ensureRSCalled = true
+	return nil
+}
+func (f *fakeBackend) EnsureReplicationDestination(_ context.Context, _ backend.EnsureParams) (*corev1.TypedLocalObjectReference, error) {
+	f.ensureRDCalled = true
+	return nil, nil
+}
+func (f *fakeBackend) TriggerFinalSync(_ context.Context, _, _ string) error { return nil }
+func (f *fakeBackend) Cleanup(_ context.Context, _, _ string) error {
+	f.cleanupCalled = true
+	return nil
+}
+
+func TestPVCReconciler_SkipUnlabelledPVC(t *testing.T) {
 	ctx := context.Background()
-	policy := &omniv1alpha1.BackupPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
-		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore: "missing-store",
-			Schedule:    "0 * * * *",
-			CopyMethod:  "Direct",
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("5Gi"),
+				},
+			},
 		},
 	}
 
+	fb := &fakeBackend{}
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(policy).
-		WithStatusSubresource(policy).
-		Build()
+		WithObjects(pvc).Build()
 
-	r := &BackupPolicyReconciler{Client: c}
+	r := &PVCReconciler{Client: c, Backend: fb, ControllerNamespace: "omnivol-system"}
 	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "hourly"},
+		NamespacedName: types.NamespacedName{Name: "data", Namespace: "prod"},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-
-	updated := &omniv1alpha1.BackupPolicy{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "hourly"}, updated); err != nil {
-		t.Fatalf("get policy: %v", err)
-	}
-
-	if len(updated.Status.Conditions) == 0 {
-		t.Fatal("expected conditions to be set")
-	}
-	cond := updated.Status.Conditions[0]
-	if cond.Status != metav1.ConditionFalse {
-		t.Errorf("condition status = %q, want False", cond.Status)
-	}
-	if cond.Reason != "BackupStoreNotFound" {
-		t.Errorf("condition reason = %q, want BackupStoreNotFound", cond.Reason)
+	if fb.ensureRSCalled {
+		t.Error("expected EnsureReplicationSource NOT to be called for unlabelled PVC")
 	}
 }
 
-func TestBackupPolicyReconciler_StoreNotReady(t *testing.T) {
+func TestPVCReconciler_SkipUnboundPVC(t *testing.T) {
 	ctx := context.Background()
-	store := &omniv1alpha1.BackupStore{
-		ObjectMeta: metav1.ObjectMeta{Name: "default-store"},
-		Spec: omniv1alpha1.BackupStoreSpec{
-			S3: omniv1alpha1.S3Config{Endpoint: "s3", Bucket: "b", CredentialsSecret: "c"},
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "prod",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
 		},
-		Status: omniv1alpha1.BackupStoreStatus{
-			Conditions: []metav1.Condition{{
-				Type:   conditionReady,
-				Status: metav1.ConditionFalse,
-				Reason: "NotReady",
-			}},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("5Gi"),
+				},
+			},
 		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending},
 	}
 	policy := &omniv1alpha1.BackupPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
@@ -168,38 +183,56 @@ func TestBackupPolicyReconciler_StoreNotReady(t *testing.T) {
 		},
 	}
 
+	fb := &fakeBackend{}
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(store, policy).
-		WithStatusSubresource(policy).
-		Build()
+		WithObjects(pvc, policy).Build()
 
-	r := &BackupPolicyReconciler{Client: c}
-	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "hourly"},
+	r := &PVCReconciler{Client: c, Backend: fb, ControllerNamespace: "omnivol-system"}
+	res, err := r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "data", Namespace: "prod"},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-
-	updated := &omniv1alpha1.BackupPolicy{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "hourly"}, updated); err != nil {
-		t.Fatalf("get policy: %v", err)
+	if fb.ensureRSCalled {
+		t.Error("expected EnsureReplicationSource NOT to be called for unbound PVC")
 	}
-
-	if len(updated.Status.Conditions) == 0 {
-		t.Fatal("expected conditions to be set")
-	}
-	cond := updated.Status.Conditions[0]
-	if cond.Status != metav1.ConditionFalse {
-		t.Errorf("condition status = %q, want False", cond.Status)
-	}
-	if cond.Reason != "BackupStoreNotReady" {
-		t.Errorf("condition reason = %q, want BackupStoreNotReady", cond.Reason)
+	if res.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter > 0 for unbound PVC")
 	}
 }
 
-func TestBackupPolicyReconciler_ReadyWithPVCCount(t *testing.T) {
+func TestPVCReconciler_EnsuresRS(t *testing.T) {
 	ctx := context.Background()
+	scName := "topolvm-thin"
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "prod",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
+			UID:       "test-uid-123",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			VolumeName:       "pv-data",
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("5Gi"),
+				},
+			},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	policy := &omniv1alpha1.BackupPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
+		Spec: omniv1alpha1.BackupPolicySpec{
+			BackupStore: "default-store",
+			Schedule:    "0 * * * *",
+			CopyMethod:  "Direct",
+			Retain:      omniv1alpha1.RetainPolicy{Hourly: ptr(int32(24))},
+		},
+	}
 	store := &omniv1alpha1.BackupStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "default-store"},
 		Spec: omniv1alpha1.BackupStoreSpec{
@@ -213,58 +246,29 @@ func TestBackupPolicyReconciler_ReadyWithPVCCount(t *testing.T) {
 			}},
 		},
 	}
-	policy := &omniv1alpha1.BackupPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
-		Spec: omniv1alpha1.BackupPolicySpec{
-			BackupStore: "default-store",
-			Schedule:    "0 * * * *",
-			CopyMethod:  "Direct",
+	// Create a fake RS so we skip the S3 backup-exists check.
+	rs := &volsyncv1alpha1.ReplicationSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "prod",
 		},
 	}
-	// StorageClass using the omnivol provisioner with this policy.
-	sc := &storagev1.StorageClass{
-		ObjectMeta:  metav1.ObjectMeta{Name: "omnivol-hourly"},
-		Provisioner: "omnivol.smoothify.com/provisioner",
-		Parameters:  map[string]string{"backupPolicy": "hourly"},
-	}
-	// Two PVCs using this StorageClass.
-	scName := "omnivol-hourly"
-	pvc1 := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc-a", Namespace: "prod"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
-	}
-	pvc2 := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc-b", Namespace: "staging"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
-	}
 
+	fb := &fakeBackend{}
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(store, policy, sc, pvc1, pvc2).
+		WithObjects(pvc, policy, store, rs).
 		WithStatusSubresource(policy).
 		Build()
 
-	r := &BackupPolicyReconciler{Client: c}
+	r := &PVCReconciler{Client: c, Backend: fb, ControllerNamespace: "omnivol-system"}
 	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "hourly"},
+		NamespacedName: types.NamespacedName{Name: "data", Namespace: "prod"},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-
-	updated := &omniv1alpha1.BackupPolicy{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "hourly"}, updated); err != nil {
-		t.Fatalf("get policy: %v", err)
-	}
-
-	if len(updated.Status.Conditions) == 0 {
-		t.Fatal("expected conditions to be set")
-	}
-	cond := updated.Status.Conditions[0]
-	if cond.Status != metav1.ConditionTrue {
-		t.Errorf("condition status = %q, want True", cond.Status)
-	}
-	if updated.Status.ManagedPVCCount != 2 {
-		t.Errorf("managedPVCCount = %d, want 2", updated.Status.ManagedPVCCount)
+	if !fb.ensureRSCalled {
+		t.Error("expected EnsureReplicationSource to be called")
 	}
 }
 
@@ -275,7 +279,7 @@ func TestOrphanReconciler_RS_DeletedWhenPVCMissing(t *testing.T) {
 
 	rs := &volsyncv1alpha1.ReplicationSource{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "data-omnivol",
+			Name:      "data",
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: labelManagedByValue},
 			Annotations: map[string]string{
@@ -290,14 +294,14 @@ func TestOrphanReconciler_RS_DeletedWhenPVCMissing(t *testing.T) {
 
 	r := &OrphanReconciler{Client: c}
 	_, err := r.reconcileReplicationSource(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "data-omnivol", Namespace: "prod"},
+		NamespacedName: types.NamespacedName{Name: "data", Namespace: "prod"},
 	})
 	if err != nil {
 		t.Fatalf("reconcileReplicationSource() error = %v", err)
 	}
 
 	// RS should be deleted.
-	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err == nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "data", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err == nil {
 		t.Error("expected RS to be deleted")
 	}
 }
@@ -307,7 +311,7 @@ func TestOrphanReconciler_RS_KeptWhenPVCExists(t *testing.T) {
 
 	rs := &volsyncv1alpha1.ReplicationSource{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "data-omnivol",
+			Name:      "data",
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: labelManagedByValue},
 			Annotations: map[string]string{
@@ -325,14 +329,14 @@ func TestOrphanReconciler_RS_KeptWhenPVCExists(t *testing.T) {
 
 	r := &OrphanReconciler{Client: c}
 	_, err := r.reconcileReplicationSource(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "data-omnivol", Namespace: "prod"},
+		NamespacedName: types.NamespacedName{Name: "data", Namespace: "prod"},
 	})
 	if err != nil {
 		t.Fatalf("reconcileReplicationSource() error = %v", err)
 	}
 
 	// RS should still exist.
-	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "data", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err != nil {
 		t.Errorf("expected RS to still exist, got err: %v", err)
 	}
 }
@@ -382,161 +386,91 @@ func TestOrphanReconciler_NotFoundHandledGracefully(t *testing.T) {
 	}
 }
 
-// --- DeletePVCOnBackup tests ---
+// --- Pod backup-on-delete tests ---
 
-const testSCName = "omnivol-sc"
-
-func TestDeletePVC_DefaultTrue_NoAnnotations(t *testing.T) {
+func TestBackupOnDelete_DefaultEnabled(t *testing.T) {
 	ctx := context.Background()
-	scName := testSCName
-	sc := &storagev1.StorageClass{
-		ObjectMeta:  metav1.ObjectMeta{Name: scName},
-		Provisioner: "omnivol.smoothify.com/provisioner",
-	}
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "default",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
+		},
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(sc, pvc, pod).Build()
+		WithObjects(pvc, pod).Build()
 
-	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: true}
-	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	r := &PodReconciler{Client: c, FinalSyncTimeout: 15 * time.Minute}
+	got, err := r.isBackupOnDeleteEnabled(ctx, pod, []string{"data"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !got {
-		t.Error("expected true (controller default), got false")
+		t.Error("expected true (default enabled for omnivol PVCs), got false")
 	}
 }
 
-func TestDeletePVC_DefaultFalse_NoAnnotations(t *testing.T) {
+func TestBackupOnDelete_PodAnnotationOptOut(t *testing.T) {
 	ctx := context.Background()
-	scName := testSCName
-	sc := &storagev1.StorageClass{
-		ObjectMeta:  metav1.ObjectMeta{Name: scName},
-		Provisioner: "omnivol.smoothify.com/provisioner",
-	}
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(sc, pvc, pod).Build()
-
-	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: false}
-	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got {
-		t.Error("expected false (controller default), got true")
-	}
-}
-
-func TestDeletePVC_StorageClassOverridesDefault(t *testing.T) {
-	ctx := context.Background()
-	scName := testSCName
-	// StorageClass sets annotation to "false", overriding default true
-	sc := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        scName,
-			Annotations: map[string]string{annDeletePVCOnBackup: "false"},
+			Name:      "data",
+			Namespace: "default",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
 		},
-		Provisioner: "omnivol.smoothify.com/provisioner",
-	}
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(sc, pvc, pod).Build()
-
-	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: true}
-	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got {
-		t.Error("expected false (StorageClass override), got true")
-	}
-}
-
-func TestDeletePVC_StorageClassEnablesWhenDefaultFalse(t *testing.T) {
-	ctx := context.Background()
-	scName := testSCName
-	sc := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        scName,
-			Annotations: map[string]string{annDeletePVCOnBackup: "true"},
-		},
-		Provisioner: "omnivol.smoothify.com/provisioner",
-	}
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(sc, pvc, pod).Build()
-
-	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: false}
-	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got {
-		t.Error("expected true (StorageClass annotation), got false")
-	}
-}
-
-func TestDeletePVC_PodAnnotationTakesPriority(t *testing.T) {
-	ctx := context.Background()
-	scName := testSCName
-	// StorageClass says true, but Pod says false — Pod wins.
-	sc := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        scName,
-			Annotations: map[string]string{annDeletePVCOnBackup: "true"},
-		},
-		Provisioner: "omnivol.smoothify.com/provisioner",
-	}
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"},
-		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &scName},
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "app-0",
 			Namespace:   "default",
-			Annotations: map[string]string{annDeletePVCOnBackup: "false"},
+			Annotations: map[string]string{annBackupOnDelete: "false"},
 		},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(sc, pvc, pod).Build()
+		WithObjects(pvc, pod).Build()
 
-	r := &PodReconciler{Client: c, DefaultDeletePVCAfterBackup: true}
-	got, err := r.isDeletePVCOnBackupEnabled(ctx, pod, "data")
+	r := &PodReconciler{Client: c, FinalSyncTimeout: 15 * time.Minute}
+	got, err := r.isBackupOnDeleteEnabled(ctx, pod, []string{"data"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got {
-		t.Error("expected false (Pod annotation overrides all), got true")
+		t.Error("expected false (pod annotation opt-out), got true")
 	}
 }
+
+func TestBackupOnDelete_PVCAnnotationOptOut(t *testing.T) {
+	ctx := context.Background()
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "data",
+			Namespace:   "default",
+			Labels:      map[string]string{labelBackupPolicy: "hourly"},
+			Annotations: map[string]string{annBackupOnDelete: "false"},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-0", Namespace: "default"},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(pvc, pod).Build()
+
+	r := &PodReconciler{Client: c, FinalSyncTimeout: 15 * time.Minute}
+	got, err := r.isBackupOnDeleteEnabled(ctx, pod, []string{"data"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false (PVC annotation opt-out), got true")
+	}
+}
+
+// --- Helpers ---
+
+func ptr[T any](v T) *T { return &v }

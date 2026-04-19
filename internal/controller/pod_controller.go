@@ -25,7 +25,6 @@ import (
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,22 +39,14 @@ const (
 	// until a final VolSync backup has completed.
 	finalizerBackupProtection = "omnivol.smoothify.com/backup-protection"
 
-	// annBackupOnDelete can be set on a Pod, PVC, or StorageClass to control
-	// whether the backup-protection finalizer should be applied.
+	// annBackupOnDelete can be set on a Pod or PVC to control whether the
+	// backup-protection finalizer should be applied.
 	// Values: "true" (opt-in), "false" (opt-out).
-	// The most specific annotation wins: Pod > PVC > StorageClass.
+	// The most specific annotation wins: Pod > PVC.
 	annBackupOnDelete = "omnivol.smoothify.com/backup-on-delete"
-
-	// annDeletePVCOnBackup can be set on a Pod, PVC, or StorageClass to control
-	// whether the PVC should be deleted after a successful final backup.
-	// Values: "true" / "false". Hierarchy: Pod > PVC > StorageClass > controller default.
-	annDeletePVCOnBackup = "omnivol.smoothify.com/delete-pvc-after-backup"
 
 	// annValueTrue is the canonical "true" value for annotations.
 	annValueTrue = "true"
-
-	// underlyingSuffix is the suffix appended to PVC names for the underlying PVC.
-	podUnderlyingSuffix = "-omnivol"
 
 	// podRequeueInterval is how often we recheck whether the manual sync finished.
 	podRequeueInterval = 5 * time.Second
@@ -68,15 +59,10 @@ const (
 //
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;update;patch
 type PodReconciler struct {
 	client.Client
-	// DefaultDeletePVCAfterBackup is the controller-wide default for deleting
-	// PVCs after a successful final backup. Can be overridden per StorageClass,
-	// PVC, or Pod via the omnivol.smoothify.com/delete-pvc-after-backup annotation.
-	DefaultDeletePVCAfterBackup bool
 	// FinalSyncTimeout defines the maximum duration to wait for a final sync to complete
 	// before bypassing the backup protection to prevent deadlocks.
 	FinalSyncTimeout time.Duration
@@ -151,12 +137,12 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		"pod", pod.Name, "namespace", pod.Namespace)
 
 	// For each Omnivol PVC, trigger a manual sync and check completion.
+	// RS name = PVC name (no -omnivol suffix in v2).
 	allComplete := true
 	for _, pvcName := range omnivolPVCNames {
-		rsName := pvcName + podUnderlyingSuffix
-		complete, syncErr := r.ensureFinalSync(ctx, rsName, pod.Namespace)
+		complete, syncErr := r.ensureFinalSync(ctx, pvcName, pod.Namespace)
 		if syncErr != nil {
-			logger.Error(syncErr, "Failed to trigger/check final sync", "replicationSource", rsName)
+			logger.Error(syncErr, "Failed to trigger/check final sync", "replicationSource", pvcName)
 			return ctrl.Result{RequeueAfter: podRequeueInterval}, nil
 		}
 		if !complete {
@@ -169,42 +155,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{RequeueAfter: podRequeueInterval}, nil
 	}
 
-	// All syncs complete — now check if we should delete the user PVCs.
-	for _, pvcName := range omnivolPVCNames {
-		deleteEnabled, err := r.isDeletePVCOnBackupEnabled(ctx, pod, pvcName)
-		if err != nil {
-			logger.Error(err, "Failed to check if PVC should be deleted", "pvc", pvcName)
-			continue
-		}
-		if deleteEnabled {
-			logger.Info("Deleting PVC after final backup", "pvc", pvcName)
-			pvc := &corev1.PersistentVolumeClaim{
-				ObjectMeta: ctrl.ObjectMeta{
-					Name:      pvcName,
-					Namespace: pod.Namespace,
-				},
-			}
-			if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete PVC", "pvc", pvcName)
-			}
-
-			// Also delete the underlying PVC to prevent stale node
-			// bindings when the StatefulSet recreates the user PVC.
-			underlyingName := pvcName + podUnderlyingSuffix
-			logger.Info("Deleting underlying PVC", "pvc", underlyingName)
-			underlyingPVC := &corev1.PersistentVolumeClaim{
-				ObjectMeta: ctrl.ObjectMeta{
-					Name:      underlyingName,
-					Namespace: pod.Namespace,
-				},
-			}
-			if err := r.Delete(ctx, underlyingPVC); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete underlying PVC", "pvc", underlyingName)
-			}
-		}
-	}
-
-	// All syncs complete and PVCs handled — remove the finalizer.
+	// All syncs complete — remove the finalizer.
 	logger.Info("Final sync complete — removing backup-protection finalizer", "pod", pod.Name)
 	controllerutil.RemoveFinalizer(pod, finalizerBackupProtection)
 	if err := r.Update(ctx, pod); err != nil {
@@ -217,41 +168,8 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	return ctrl.Result{}, nil
 }
 
-// isDeletePVCOnBackupEnabled checks the annotation hierarchy: Pod > PVC > StorageClass > controller default.
-func (r *PodReconciler) isDeletePVCOnBackupEnabled(ctx context.Context, pod *corev1.Pod, pvcName string) (bool, error) {
-	// Check Pod annotation first (highest priority).
-	if v, ok := pod.Annotations[annDeletePVCOnBackup]; ok {
-		return v == annValueTrue, nil
-	}
-
-	// Check PVC annotation.
-	pvc := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: pod.Namespace}, pvc); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.DefaultDeletePVCAfterBackup, nil
-		}
-		return false, err
-	}
-	if v, ok := pvc.Annotations[annDeletePVCOnBackup]; ok {
-		return v == annValueTrue, nil
-	}
-
-	// Check StorageClass annotation.
-	if pvc.Spec.StorageClassName != nil {
-		sc := &storagev1.StorageClass{}
-		if err := r.Get(ctx, types.NamespacedName{Name: *pvc.Spec.StorageClassName}, sc); err == nil {
-			if v, ok := sc.Annotations[annDeletePVCOnBackup]; ok {
-				return v == annValueTrue, nil
-			}
-		}
-	}
-
-	// Fall back to controller-wide default.
-	return r.DefaultDeletePVCAfterBackup, nil
-}
-
-// omnivolPVCsForPod returns the names of PVCs used by the Pod whose StorageClass
-// is backed by the Omnivol provisioner.
+// omnivolPVCsForPod returns the names of PVCs used by the Pod that have
+// the omnivol backup-policy label.
 func (r *PodReconciler) omnivolPVCsForPod(ctx context.Context, pod *corev1.Pod) []string {
 	var names []string
 	for _, vol := range pod.Spec.Volumes {
@@ -263,21 +181,14 @@ func (r *PodReconciler) omnivolPVCsForPod(ctx context.Context, pod *corev1.Pod) 
 		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: pod.Namespace}, pvc); err != nil {
 			continue
 		}
-		if pvc.Spec.StorageClassName == nil {
-			continue
-		}
-		sc := &storagev1.StorageClass{}
-		if err := r.Get(ctx, types.NamespacedName{Name: *pvc.Spec.StorageClassName}, sc); err != nil {
-			continue
-		}
-		if sc.Provisioner == "omnivol.smoothify.com/provisioner" {
+		if pvc.Labels[labelBackupPolicy] != "" {
 			names = append(names, pvcName)
 		}
 	}
 	return names
 }
 
-// isBackupOnDeleteEnabled checks the annotation hierarchy: Pod > PVC > StorageClass.
+// isBackupOnDeleteEnabled checks the annotation hierarchy: Pod > PVC.
 // Default is true (opt-in by default for Omnivol PVCs).
 func (r *PodReconciler) isBackupOnDeleteEnabled(ctx context.Context, pod *corev1.Pod, pvcNames []string) (bool, error) {
 	// Check Pod annotation first (highest priority).
@@ -299,24 +210,6 @@ func (r *PodReconciler) isBackupOnDeleteEnabled(ctx context.Context, pod *corev1
 		}
 	}
 
-	// Check StorageClass annotations.
-	for _, pvcName := range pvcNames {
-		pvc := &corev1.PersistentVolumeClaim{}
-		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: pod.Namespace}, pvc); err != nil {
-			continue
-		}
-		if pvc.Spec.StorageClassName == nil {
-			continue
-		}
-		sc := &storagev1.StorageClass{}
-		if err := r.Get(ctx, types.NamespacedName{Name: *pvc.Spec.StorageClassName}, sc); err != nil {
-			continue
-		}
-		if v, ok := sc.Annotations[annBackupOnDelete]; ok {
-			return v == annValueTrue, nil
-		}
-	}
-
 	// Default: enabled for all Omnivol PVCs.
 	return true, nil
 }
@@ -328,16 +221,6 @@ func (r *PodReconciler) ensureFinalSync(ctx context.Context, rsName, namespace s
 	if err := r.Get(ctx, types.NamespacedName{Name: rsName, Namespace: namespace}, rs); err != nil {
 		if apierrors.IsNotFound(err) {
 			// No ReplicationSource means no backup was ever set up — skip.
-			return true, nil
-		}
-		return false, err
-	}
-
-	// Verify that the underlying PVC actually exists. If it has been deleted,
-	// VolSync can never back it up, so we should skip waiting to avoid deadlocks.
-	underlyingPVC := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, types.NamespacedName{Name: rsName, Namespace: namespace}, underlyingPVC); err != nil {
-		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
 		return false, err

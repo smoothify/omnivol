@@ -42,6 +42,7 @@ func newScheme() *runtime.Scheme {
 const testControllerNS = "omnivol-system"
 
 func newTestParams(controllerNS string) backend.EnsureParams {
+	scName := "topolvm-thin"
 	return backend.EnsureParams{
 		Policy: &omniv1alpha1.BackupPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
@@ -69,16 +70,16 @@ func newTestParams(controllerNS string) backend.EnsureParams {
 				},
 			},
 		},
-		UnderlyingPVC: &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: "data-omnivol", Namespace: "prod"},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &scName,
+			},
 		},
-		RepoPath:                   "prod/data",
-		Schedule:                   "42 * * * *",
-		ResticSecretName:           "omnivol-data",
-		UserPVCName:                "data",
-		UserPVCNamespace:           "prod",
-		ControllerNamespace:        controllerNS,
-		UnderlyingStorageClassName: "openebs-lvm",
+		RepoPath:            "prod/data",
+		Schedule:            "42 * * * *",
+		ResticSecretName:    "omnivol-data",
+		ControllerNamespace: controllerNS,
 	}
 }
 
@@ -246,10 +247,10 @@ func TestCleanup_DeletesAllResources(t *testing.T) {
 	ctx := context.Background()
 
 	rs := &volsyncv1alpha1.ReplicationSource{
-		ObjectMeta: metav1.ObjectMeta{Name: "data-omnivol", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
 	}
 	rd := &volsyncv1alpha1.ReplicationDestination{
-		ObjectMeta: metav1.ObjectMeta{Name: "data-omnivol", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "omnivol-data", Namespace: "prod"},
@@ -259,15 +260,15 @@ func TestCleanup_DeletesAllResources(t *testing.T) {
 		WithObjects(rs, rd, secret).Build()
 	b := New(c)
 
-	if err := b.Cleanup(ctx, "data-omnivol", "prod"); err != nil {
+	if err := b.Cleanup(ctx, "data", "prod"); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
 	// Verify all resources are gone.
-	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err == nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "data", Namespace: "prod"}, &volsyncv1alpha1.ReplicationSource{}); err == nil {
 		t.Error("expected ReplicationSource to be deleted")
 	}
-	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, &volsyncv1alpha1.ReplicationDestination{}); err == nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "data", Namespace: "prod"}, &volsyncv1alpha1.ReplicationDestination{}); err == nil {
 		t.Error("expected ReplicationDestination to be deleted")
 	}
 	if err := c.Get(ctx, types.NamespacedName{Name: "omnivol-data", Namespace: "prod"}, &corev1.Secret{}); err == nil {
@@ -281,7 +282,7 @@ func TestCleanup_NoErrorWhenResourcesMissing(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	b := New(c)
 
-	if err := b.Cleanup(ctx, "nonexistent-omnivol", "prod"); err != nil {
+	if err := b.Cleanup(ctx, "nonexistent", "prod"); err != nil {
 		t.Fatalf("Cleanup() should not error for missing resources, got: %v", err)
 	}
 }

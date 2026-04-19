@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package drain watches Node cordon events and triggers a manual VolSync sync
-// for any PV managed by omnivol that is pinned to the cordoned node.
+// for any PVC managed by omnivol that is pinned to the cordoned node.
 package drain
 
 import (
@@ -35,15 +35,16 @@ import (
 )
 
 const (
-	labelManagedBy      = "omnivol.smoothify.com/managed-by"
-	labelManagedByValue = "omnivol"
+	// labelBackupPolicy is the label that identifies omnivol-managed PVCs.
+	labelBackupPolicy = "omnivol.smoothify.com/backup-policy"
 )
 
 // Watcher reconciles Node objects.  When a Node becomes unschedulable (cordoned)
-// it locates all PVs managed by omnivol with node affinity matching that node and
+// it locates all PVCs managed by omnivol with PVs pinned to that node and
 // fires a manual pre-drain sync for each.
 //
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -80,8 +81,8 @@ func (w *Watcher) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(w)
 }
 
-// Reconcile is called when a Node is cordoned.  It finds all omnivol-managed PVs
-// pinned to that node and triggers a pre-drain manual sync on each.
+// Reconcile is called when a Node is cordoned.  It finds all omnivol-managed PVCs
+// whose PV is pinned to that node and triggers a pre-drain manual sync on each.
 func (w *Watcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -94,28 +95,34 @@ func (w *Watcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 		return ctrl.Result{}, nil
 	}
 
-	logger.Info("Node cordoned — scanning for omnivol PVs", "node", node.Name)
+	logger.Info("Node cordoned — scanning for omnivol PVCs", "node", node.Name)
 
-	pvList := &corev1.PersistentVolumeList{}
-	if err := w.List(ctx, pvList, client.MatchingLabels{labelManagedBy: labelManagedByValue}); err != nil {
+	// Find all PVCs with the backup-policy label.
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	if err := w.List(ctx, pvcList, client.HasLabels{labelBackupPolicy}); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	var syncErrors []error
-	for _, pv := range pvList.Items {
-		if !pvPinnedToNode(&pv, node.Name) {
+	for _, pvc := range pvcList.Items {
+		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 			continue
 		}
 
-		underlyingName := pv.Annotations["omnivol.smoothify.com/underlying-pvc"]
-		underlyingNS := pv.Annotations["omnivol.smoothify.com/underlying-namespace"]
-		if underlyingName == "" || underlyingNS == "" {
+		// Check if the PV is pinned to the cordoned node.
+		pv := &corev1.PersistentVolume{}
+		if err := w.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
 			continue
 		}
 
-		logger.Info("Triggering pre-drain sync", "pv", pv.Name, "underlyingPVC", underlyingName, "node", node.Name)
-		if err := w.triggerManualSync(ctx, underlyingName, underlyingNS, node.Name); err != nil {
-			logger.Error(err, "Could not trigger pre-drain sync", "pv", pv.Name)
+		if !pvPinnedToNode(pv, node.Name) {
+			continue
+		}
+
+		// RS name = PVC name (no suffix in the new model).
+		logger.Info("Triggering pre-drain sync", "pvc", pvc.Name, "namespace", pvc.Namespace, "node", node.Name)
+		if err := w.triggerManualSync(ctx, pvc.Name, pvc.Namespace, node.Name); err != nil {
+			logger.Error(err, "Could not trigger pre-drain sync", "pvc", pvc.Name)
 			syncErrors = append(syncErrors, err)
 		}
 	}
@@ -149,7 +156,7 @@ func pvPinnedToNode(pv *corev1.PersistentVolume, nodeName string) bool {
 }
 
 // triggerManualSync patches the ReplicationSource with a unique manual trigger value
-// and returns without waiting (fire-and-forget per PLAN.md).
+// and returns without waiting (fire-and-forget).
 func (w *Watcher) triggerManualSync(ctx context.Context, rsName, namespace, nodeName string) error {
 	rs := &volsyncv1alpha1.ReplicationSource{}
 	if err := w.Get(ctx, types.NamespacedName{Name: rsName, Namespace: namespace}, rs); err != nil {

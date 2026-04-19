@@ -111,7 +111,7 @@ func TestPvPinnedToNode_MatchFields(t *testing.T) {
 
 // --- Reconcile ---
 
-func TestReconcile_CordonedNodeTriggersSyncForPinnedPV(t *testing.T) {
+func TestReconcile_CordonedNodeTriggersSyncForPinnedPVC(t *testing.T) {
 	ctx := context.Background()
 
 	node := &corev1.Node{
@@ -120,14 +120,7 @@ func TestReconcile_CordonedNodeTriggersSyncForPinnedPV(t *testing.T) {
 	}
 
 	pv := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "pv-data",
-			Labels: map[string]string{labelManagedBy: labelManagedByValue},
-			Annotations: map[string]string{
-				"omnivol.smoothify.com/underlying-pvc":       "data-omnivol",
-				"omnivol.smoothify.com/underlying-namespace": "prod",
-			},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data"},
 		Spec: corev1.PersistentVolumeSpec{
 			NodeAffinity: &corev1.VolumeNodeAffinity{
 				Required: &corev1.NodeSelector{
@@ -143,12 +136,24 @@ func TestReconcile_CordonedNodeTriggersSyncForPinnedPV(t *testing.T) {
 		},
 	}
 
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data",
+			Namespace: "prod",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pv-data",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
 	rs := &volsyncv1alpha1.ReplicationSource{
-		ObjectMeta: metav1.ObjectMeta{Name: "data-omnivol", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(node, pv, rs).Build()
+		WithObjects(node, pv, pvc, rs).Build()
 	w := &Watcher{Client: c}
 
 	_, err := w.Reconcile(ctx, ctrl.Request{
@@ -160,7 +165,7 @@ func TestReconcile_CordonedNodeTriggersSyncForPinnedPV(t *testing.T) {
 
 	// Verify the RS was patched with a manual trigger.
 	updated := &volsyncv1alpha1.ReplicationSource{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, updated); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "data", Namespace: "prod"}, updated); err != nil {
 		t.Fatalf("get RS: %v", err)
 	}
 	if updated.Spec.Trigger == nil || updated.Spec.Trigger.Manual == "" {
@@ -191,7 +196,7 @@ func TestReconcile_SkipsNonCordonedNode(t *testing.T) {
 	}
 }
 
-func TestReconcile_SkipsPVOnDifferentNode(t *testing.T) {
+func TestReconcile_SkipsPVCOnDifferentNode(t *testing.T) {
 	ctx := context.Background()
 
 	node := &corev1.Node{
@@ -200,14 +205,7 @@ func TestReconcile_SkipsPVOnDifferentNode(t *testing.T) {
 	}
 
 	pv := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "pv-other",
-			Labels: map[string]string{labelManagedBy: labelManagedByValue},
-			Annotations: map[string]string{
-				"omnivol.smoothify.com/underlying-pvc":       "other-omnivol",
-				"omnivol.smoothify.com/underlying-namespace": "prod",
-			},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-other"},
 		Spec: corev1.PersistentVolumeSpec{
 			NodeAffinity: &corev1.VolumeNodeAffinity{
 				Required: &corev1.NodeSelector{
@@ -223,12 +221,24 @@ func TestReconcile_SkipsPVOnDifferentNode(t *testing.T) {
 		},
 	}
 
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other",
+			Namespace: "prod",
+			Labels:    map[string]string{labelBackupPolicy: "hourly"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pv-other",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
 	rs := &volsyncv1alpha1.ReplicationSource{
-		ObjectMeta: metav1.ObjectMeta{Name: "other-omnivol", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "prod"},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(node, pv, rs).Build()
+		WithObjects(node, pv, pvc, rs).Build()
 	w := &Watcher{Client: c}
 
 	_, err := w.Reconcile(ctx, ctrl.Request{
@@ -240,7 +250,7 @@ func TestReconcile_SkipsPVOnDifferentNode(t *testing.T) {
 
 	// RS should NOT have been patched.
 	updated := &volsyncv1alpha1.ReplicationSource{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "other-omnivol", Namespace: "prod"}, updated); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "other", Namespace: "prod"}, updated); err != nil {
 		t.Fatalf("get RS: %v", err)
 	}
 	if updated.Spec.Trigger != nil && updated.Spec.Trigger.Manual != "" {
@@ -267,19 +277,19 @@ func TestTriggerManualSync_PatchesRS(t *testing.T) {
 	ctx := context.Background()
 
 	rs := &volsyncv1alpha1.ReplicationSource{
-		ObjectMeta: metav1.ObjectMeta{Name: "data-omnivol", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "prod"},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).
 		WithObjects(rs).Build()
 	w := &Watcher{Client: c}
 
-	if err := w.triggerManualSync(ctx, "data-omnivol", "prod", "worker-1"); err != nil {
+	if err := w.triggerManualSync(ctx, "data", "prod", "worker-1"); err != nil {
 		t.Fatalf("triggerManualSync() error = %v", err)
 	}
 
 	updated := &volsyncv1alpha1.ReplicationSource{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "data-omnivol", Namespace: "prod"}, updated); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "data", Namespace: "prod"}, updated); err != nil {
 		t.Fatalf("get RS: %v", err)
 	}
 	if updated.Spec.Trigger == nil || !strings.HasPrefix(updated.Spec.Trigger.Manual, "pre-drain-worker-1-") {

@@ -27,37 +27,28 @@ import (
 	omniv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
 )
 
-// BackupExists reports whether at least one restic snapshot already exists in
-// the backend store at the computed repository path.
-type BackupExistsFunc func(ctx context.Context) (bool, error)
-
 // Interface is the abstraction that omnivol uses to interact with a backup
 // backend.  The VolSync backend is the first (and currently only) implementation.
 type Interface interface {
 	// Name returns a human-readable identifier for this backend (e.g. "volsync").
 	Name() string
 
-	// BackupExists checks whether a prior backup exists for the given PVC at the
-	// repository path that would be computed from the policy + PVC annotations.
-	BackupExists(ctx context.Context, repoPath string) (bool, error)
-
 	// EnsureReplicationSource creates or updates the VolSync ReplicationSource
-	// for the given underlying PVC according to the policy.
+	// for the given PVC according to the policy.
 	EnsureReplicationSource(ctx context.Context, params EnsureParams) error
 
 	// EnsureReplicationDestination creates or updates the VolSync
-	// ReplicationDestination for a restore operation, waits until latestImage is
-	// populated, and then deletes the destination.
-	// Returns the VolumeSnapshot name that should be used as the data source for
-	// the underlying PVC.
-	EnsureReplicationDestination(ctx context.Context, params EnsureParams) (latestImage *corev1.TypedLocalObjectReference, err error)
+	// ReplicationDestination for a restore operation, waits until the restore
+	// completes (latestImage is populated), and then deletes the destination.
+	// Returns the VolumeSnapshot name that should be used as the data source.
+	EnsureReplicationDestination(ctx context.Context, params EnsureParams) (*corev1.TypedLocalObjectReference, error)
 
 	// TriggerFinalSync patches the ReplicationSource to fire a manual sync and
 	// waits until that sync completes (or ctx is cancelled / deadline exceeded).
 	TriggerFinalSync(ctx context.Context, rsName, namespace string) error
 
 	// Cleanup removes all backend resources (ReplicationSource, ReplicationDestination,
-	// restic Secret) for the given PVC.  It does NOT delete the underlying PVC.
+	// restic Secret) for the given PVC.  It does NOT delete the PVC itself.
 	Cleanup(ctx context.Context, pvcName, namespace string) error
 }
 
@@ -73,8 +64,9 @@ type EnsureParams struct {
 	// Store is the BackupStore referenced by the policy.
 	Store *omniv1alpha1.BackupStore
 
-	// UnderlyingPVC is the real PVC managed by the underlying StorageClass (name: <pvcname>-omnivol).
-	UnderlyingPVC *corev1.PersistentVolumeClaim
+	// PVC is the user's PersistentVolumeClaim (the real PVC, directly on the
+	// underlying StorageClass).
+	PVC *corev1.PersistentVolumeClaim
 
 	// RepoPath is the computed restic repository path (may be overridden by annotation).
 	RepoPath string
@@ -85,22 +77,11 @@ type EnsureParams struct {
 	// ResticSecretName is the name of the restic credentials Secret to create/use.
 	ResticSecretName string
 
-	// UserPVCName is the name of the user-facing PVC (the virtual PVC backed by
-	// this provisioner).  Used to set orphan-tracking annotations on managed resources.
-	UserPVCName string
-
-	// UserPVCNamespace is the namespace of the user-facing PVC.
-	UserPVCNamespace string
-
 	// ControllerNamespace is the namespace where the omnivol controller runs.
 	// Credential secrets referenced by BackupStore are resolved in this namespace.
 	ControllerNamespace string
 
-	// UnderlyingStorageClassName is the name of the real StorageClass (e.g. openebs-lvm)
-	// that backs the omnivol PVC.  Read from the omnivol StorageClass parameters.
-	UnderlyingStorageClassName string
-
-	// NodeName is the node the underlying PV resides on.  Used to pin the
-	// VolSync mover pod (and its cache PVC) to the correct node.
+	// NodeName is the node the PV resides on.  Used to pin the VolSync mover
+	// pod (and its cache PVC) to the correct node.
 	NodeName string
 }

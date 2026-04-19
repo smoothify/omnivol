@@ -21,8 +21,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -89,14 +89,9 @@ func (in *BackupPolicyList) DeepCopyObject() runtime.Object {
 func (in *BackupPolicySpec) DeepCopyInto(out *BackupPolicySpec) {
 	*out = *in
 	in.Retain.DeepCopyInto(&out.Retain)
-	if in.DeleteTimeout != nil {
-		in, out := &in.DeleteTimeout, &out.DeleteTimeout
-		*out = new(v1.Duration)
-		**out = **in
-	}
 	if in.MoverSecurityContext != nil {
 		in, out := &in.MoverSecurityContext, &out.MoverSecurityContext
-		*out = new(corev1.PodSecurityContext)
+		*out = new(v1.PodSecurityContext)
 		(*in).DeepCopyInto(*out)
 	}
 }
@@ -116,7 +111,7 @@ func (in *BackupPolicyStatus) DeepCopyInto(out *BackupPolicyStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -213,7 +208,7 @@ func (in *BackupStoreStatus) DeepCopyInto(out *BackupStoreStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}

@@ -23,7 +23,6 @@ import (
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -272,7 +271,7 @@ func (r *MetricsReconciler) resolveStoreAndRepo(ctx context.Context, rs *volsync
 }
 
 // resolvePolicyName looks up the BackupPolicy name for a ReplicationSource by
-// walking: underlying PVC name → user PVC name → StorageClass → parameters["backupPolicy"].
+// reading the backup-policy label from the owner PVC.
 func (r *MetricsReconciler) resolvePolicyName(ctx context.Context, rs *volsyncv1alpha1.ReplicationSource) string {
 	// The user PVC name is stored in an annotation.
 	userPVC := rs.Annotations[annOwnerPVCName]
@@ -281,19 +280,9 @@ func (r *MetricsReconciler) resolvePolicyName(ctx context.Context, rs *volsyncv1
 		return ""
 	}
 
-	// Look up the user PVC to get its StorageClass, then resolve the
-	// "backupPolicy" parameter from the omnivol provisioner StorageClass.
-	uPVC := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, types.NamespacedName{Name: userPVC, Namespace: userNS}, uPVC); err != nil {
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: userPVC, Namespace: userNS}, pvc); err != nil {
 		return ""
 	}
-	if uPVC.Spec.StorageClassName == nil {
-		return ""
-	}
-
-	sc := &storagev1.StorageClass{}
-	if err := r.Get(ctx, types.NamespacedName{Name: *uPVC.Spec.StorageClassName}, sc); err != nil {
-		return ""
-	}
-	return sc.Parameters["backupPolicy"]
+	return pvc.Labels[labelBackupPolicy]
 }

@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -30,22 +29,18 @@ import (
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
-	sigprovisioner "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
 	omnivolv1alpha1 "github.com/smoothify/omnivol/api/v1alpha1"
 	"github.com/smoothify/omnivol/internal/controller"
 	"github.com/smoothify/omnivol/internal/drain"
 	_ "github.com/smoothify/omnivol/internal/metrics" // registers Prometheus gauges
-	"github.com/smoothify/omnivol/internal/provisioner"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -71,7 +66,6 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
-	var defaultDeletePVCAfterBackup bool
 	var defaultFinalSyncTimeout time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -91,9 +85,6 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.BoolVar(&defaultDeletePVCAfterBackup, "default-delete-pvc-after-backup", true,
-		"Default for deleting PVCs after a successful final backup. "+
-			"Can be overridden per StorageClass, PVC, or Pod via annotation.")
 	flag.DurationVar(&defaultFinalSyncTimeout, "default-final-sync-timeout", 15*time.Minute,
 		"Default timeout for the final backup sync when deleting a protected pod.")
 	opts := zap.Options{
@@ -210,10 +201,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.BackupPolicyReconciler{
-		Client: mgr.GetClient(),
+	if err := (&controller.PVCReconciler{
+		Client:              mgr.GetClient(),
+		ControllerNamespace: controllerNS,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to set up BackupPolicy controller")
+		setupLog.Error(err, "Failed to set up PVC controller")
 		os.Exit(1)
 	}
 
@@ -225,9 +217,8 @@ func main() {
 	}
 
 	if err := (&controller.PodReconciler{
-		Client:                      mgr.GetClient(),
-		DefaultDeletePVCAfterBackup: defaultDeletePVCAfterBackup,
-		FinalSyncTimeout:            defaultFinalSyncTimeout,
+		Client:           mgr.GetClient(),
+		FinalSyncTimeout: defaultFinalSyncTimeout,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up Pod backup-protection controller")
 		os.Exit(1)
@@ -266,50 +257,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Wait for cache sync before starting the provisioner.
-	// The provisioner uses the manager's client which is only ready after Start().
-	// We wrap it in a manager.Runnable so it runs exactly when the manager is elected leader.
 	ctx := ctrl.SetupSignalHandler()
-	prov := provisioner.New(mgr.GetClient(), mgr.GetAPIReader(), controllerNS)
-	kubeClient, err := kubeClientset(mgr.GetConfig())
-	if err != nil {
-		setupLog.Error(err, "Failed to create kubernetes clientset")
-		os.Exit(1)
-	}
-	pc := sigprovisioner.NewProvisionController(
-		ctx,
-		kubeClient,
-		provisioner.ProvisionerName,
-		prov,
-		sigprovisioner.LeaderElection(false), // Rely entirely on controller-runtime's leader election
-	)
-
-	if err := mgr.Add(&provisionerRunnable{pc: pc}); err != nil {
-		setupLog.Error(err, "Failed to add provisioner controller to manager")
-		os.Exit(1)
-	}
-
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
-}
-
-// provisionerRunnable wraps the external provisioner so it can be managed by controller-runtime.
-type provisionerRunnable struct {
-	pc *sigprovisioner.ProvisionController
-}
-
-// Start runs the provisioner. The controller manager's leader election guarantees this
-// is only called when the manager is elected leader.
-func (r *provisionerRunnable) Start(ctx context.Context) error {
-	setupLog.Info("Starting external provisioner")
-	r.pc.Run(ctx)
-	return nil
-}
-
-// kubeClientset builds a typed Kubernetes clientset from the manager's rest.Config.
-func kubeClientset(cfg *rest.Config) (kubernetes.Interface, error) {
-	return kubernetes.NewForConfig(cfg)
 }

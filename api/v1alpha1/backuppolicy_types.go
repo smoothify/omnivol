@@ -22,7 +22,7 @@ import (
 )
 
 // BackupPolicySpec defines HOW and WHEN backups are taken for PVCs that
-// reference a StorageClass backed by this policy.
+// reference this policy via the omnivol.smoothify.com/backup-policy label.
 type BackupPolicySpec struct {
 	// backupStore is the name of the BackupStore (cluster-scoped) that provides
 	// the S3 endpoint and credentials.
@@ -50,17 +50,14 @@ type BackupPolicySpec struct {
 	// +kubebuilder:validation:Enum=None;Clone;Snapshot;Direct
 	CopyMethod string `json:"copyMethod"`
 
-	// restoreOnCreate controls whether the provisioner blocks PV binding until
-	// a restore from the latest S3 backup completes (when a prior backup exists).
-	// Defaults to true.
+	// autoMigrate controls whether PVCs governed by this policy are automatically
+	// migrated off nodes that become cordoned or NotReady.  When true, omnivol
+	// triggers a final backup, deletes the PVC (cascade-deleting the PV), recreates
+	// the PVC, and restores from backup on the new node.
+	// Individual PVCs may override via the omnivol.smoothify.com/auto-migrate annotation.
 	// +optional
-	// +kubebuilder:default=true
-	RestoreOnCreate bool `json:"restoreOnCreate,omitempty"`
-
-	// deleteTimeout is the maximum duration to wait for a final pre-delete backup
-	// to complete before forcibly removing the PVC.  Defaults to 5 minutes if not set.
-	// +optional
-	DeleteTimeout *metav1.Duration `json:"deleteTimeout,omitempty"`
+	// +kubebuilder:default=false
+	AutoMigrate bool `json:"autoMigrate,omitempty"`
 
 	// repositoryPath is the default restic repository path prefix inside the bucket.
 	// Individual PVCs may override via the omnivol.smoothify.com/repository-path annotation.
@@ -132,9 +129,8 @@ type BackupPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // BackupPolicy is the Schema for the backuppolicies API.
-// A BackupPolicy describes HOW and WHEN backups are taken, and which underlying
-// StorageClass provides the real PV.  A StorageClass references a BackupPolicy
-// via the "backupPolicy" parameter, tying PVC creation to this policy.
+// A BackupPolicy describes HOW and WHEN backups are taken.  PVCs reference a
+// BackupPolicy via the label omnivol.smoothify.com/backup-policy=<name>.
 type BackupPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 
